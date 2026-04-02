@@ -45,10 +45,16 @@ mkdir -p output
 docker compose up
 ```
 
-The first run will build the Docker image (a few minutes). On success you'll see:
+The first run builds the Docker image (a few minutes). On success you'll see:
 
 ```
 mcp-podcast-generator  | MCP Podcast Generator listening on port 3000
+```
+
+To run in the background (detached):
+
+```bash
+docker compose up -d
 ```
 
 ### 4. Verify it's running
@@ -56,6 +62,22 @@ mcp-podcast-generator  | MCP Podcast Generator listening on port 3000
 ```bash
 curl http://localhost:3000/health
 # → {"status":"ok"}
+```
+
+### Common Docker operations
+
+```bash
+# View logs (follow mode)
+docker compose logs -f
+
+# Stop the server
+docker compose down
+
+# Rebuild the image after code changes
+docker compose up --build
+
+# Remove containers and volumes (full reset)
+docker compose down -v
 ```
 
 ### 5. Generate your first podcast
@@ -111,20 +133,6 @@ If you're using an MCP-aware client (e.g. Claude Desktop, Cursor), add the serve
 ```
 
 The `generate_podcast` tool will then be available directly from the chat interface.
-
----
-
-## Quick Start
-
-```bash
-cp .env.example .env
-# Edit .env and add your GOOGLE_API_KEY
-
-mkdir -p output
-docker compose up
-```
-
-The MCP endpoint is available at `http://localhost:3000/mcp`.
 
 ## Environment Variables
 

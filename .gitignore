@@ -5,3 +5,4 @@ output/
 *.mp3
 *.pcm
 *.wav
+.DS_store

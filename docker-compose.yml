@@ -1,0 +1,21 @@
+services:
+  mcp-podcast-generator:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - OUTPUT_DIR=/output
+      - TEMP_DIR=/tmp/podcast-gen
+      - PORT=3000
+    volumes:
+      - ./output:/output
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '2'
+        reservations:
+          memory: 256M
+          cpus: '0.5'

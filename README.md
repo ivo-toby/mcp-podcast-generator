@@ -112,11 +112,12 @@ On success you'll get back the output path and duration:
 {
   "success": true,
   "outputPath": "/output/first-episode.mp3",
-  "durationSeconds": 18.4
+  "durationSeconds": 18.4,
+  "downloadUrl": "http://localhost:3000/output/first-episode.mp3"
 }
 ```
 
-Your MP3 is in `./output/first-episode.mp3`.
+Your MP3 is available at `http://localhost:3000/output/first-episode.mp3` and on disk at `./output/first-episode.mp3`.
 
 ### 6. Install in Claude Desktop (optional)
 
@@ -161,6 +162,7 @@ Claude will call the tool and return the output path when done.
 | `OUTPUT_DIR` | | `/output` | Directory where MP3 files are written |
 | `TEMP_DIR` | | `/tmp/podcast-gen` | Temporary processing directory |
 | `PORT` | | `3000` | HTTP server port |
+| `PUBLIC_URL` | | `http://localhost:3000` | Base URL used to construct download links returned by the tool. Set this to your public hostname when running behind a reverse proxy or on a remote server. |
 
 ## MCP Endpoint
 
@@ -209,7 +211,8 @@ Claude will call the tool and return the output path when done.
 {
   "success": true,
   "outputPath": "/output/episode-2026-04-02.mp3",
-  "durationSeconds": 245.3
+  "durationSeconds": 245.3,
+  "downloadUrl": "http://localhost:3000/output/episode-2026-04-02.mp3"
 }
 ```
 

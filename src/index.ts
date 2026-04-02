@@ -11,6 +11,7 @@ const config = {
   outputDir: process.env.OUTPUT_DIR ?? '/output',
   tempDir: process.env.TEMP_DIR ?? '/tmp/podcast-gen',
   port: parseInt(process.env.PORT ?? '3000', 10),
+  publicUrl: (process.env.PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? '3000'}`).replace(/\/$/, ''),
 };
 
 if (!config.googleApiKey) {
@@ -42,12 +43,13 @@ function createMcpServer(): McpServer {
       try {
         const validated = GeneratePodcastInput.parse(input);
         const result = await generatePodcast(validated, config);
+        const downloadUrl = `${config.publicUrl}/output/${validated.outputFilename}`;
 
         return {
           content: [
             {
               type: 'text' as const,
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify({ ...result, downloadUrl }, null, 2),
             },
           ],
         };
@@ -81,6 +83,9 @@ app.use((req, _res, next) => {
 });
 
 app.use(express.json({ limit: '10mb' }));
+
+// Serve generated MP3s so agents and users can download them directly
+app.use('/output', express.static(config.outputDir));
 
 // Catch JSON body parse errors (malformed or oversized payload)
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
@@ -136,7 +141,7 @@ app.get('/mcp', (_req, res) => {
 
 app.listen(config.port, () => {
   logger.info(
-    { port: config.port, outputDir: config.outputDir },
+    { port: config.port, outputDir: config.outputDir, publicUrl: config.publicUrl },
     'MCP Podcast Generator started'
   );
 });

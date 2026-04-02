@@ -8,6 +8,112 @@ An MCP (Model Context Protocol) server that generates podcast audio from scripts
 - Applies **EBU R128 loudness normalization** via FFmpeg
 - Outputs the final **MP3** to a volume-mapped `/output` folder
 
+## Getting Started
+
+### Prerequisites
+
+- **Docker** and **Docker Compose** installed ([get Docker](https://docs.docker.com/get-docker/))
+- A **Google AI Studio API key** with access to Gemini models ([get one here](https://aistudio.google.com/app/apikey))
+- (Optional) An intro/outro MP3 hosted on any HTTPS URL (Cloudflare R2, S3, etc.)
+
+### 1. Clone and configure
+
+```bash
+git clone https://github.com/ivo-toby/mcp-podcast-generator.git
+cd mcp-podcast-generator
+
+cp .env.example .env
+```
+
+Open `.env` and set your API key:
+
+```dotenv
+GOOGLE_API_KEY=your_api_key_here
+```
+
+### 2. Create the output directory
+
+MP3 files are written to `./output` on the host (mapped to `/output` inside the container):
+
+```bash
+mkdir -p output
+```
+
+### 3. Start the server
+
+```bash
+docker compose up
+```
+
+The first run will build the Docker image (a few minutes). On success you'll see:
+
+```
+mcp-podcast-generator  | MCP Podcast Generator listening on port 3000
+```
+
+### 4. Verify it's running
+
+```bash
+curl http://localhost:3000/health
+# → {"status":"ok"}
+```
+
+### 5. Generate your first podcast
+
+```bash
+curl -s -X POST http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "generate_podcast",
+      "arguments": {
+        "type": "single",
+        "hosts": [{ "name": "Host", "voice": "Kore" }],
+        "segments": [
+          { "text": "Welcome to my first AI-generated podcast episode." },
+          { "text": "Today we explore how easy it is to turn a script into audio." },
+          { "text": "Thanks for listening. See you next time!" }
+        ],
+        "outputFilename": "first-episode.mp3"
+      }
+    }
+  }' | jq .
+```
+
+On success you'll get back the output path and duration:
+
+```json
+{
+  "success": true,
+  "outputPath": "/output/first-episode.mp3",
+  "durationSeconds": 18.4
+}
+```
+
+Your MP3 is in `./output/first-episode.mp3`.
+
+### 6. Connect an MCP client (optional)
+
+If you're using an MCP-aware client (e.g. Claude Desktop, Cursor), add the server to your MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "podcast-generator": {
+      "url": "http://localhost:3000/mcp",
+      "transport": "streamable-http"
+    }
+  }
+}
+```
+
+The `generate_podcast` tool will then be available directly from the chat interface.
+
+---
+
 ## Quick Start
 
 ```bash

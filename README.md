@@ -136,12 +136,14 @@ With the container running, add the server to Claude Desktop's MCP configuration
 {
   "mcpServers": {
     "podcast-generator": {
-      "url": "http://localhost:3000/mcp",
-      "transport": "streamable-http"
+      "command": "npx",
+      "args": ["mcp-remote", "http://localhost:3000/mcp"]
     }
   }
 }
 ```
+
+Claude Desktop doesn't support Streamable HTTP directly — `mcp-remote` bridges the connection. `npx` will download it automatically on first run.
 
 If you already have other MCP servers configured, add `podcast-generator` alongside them inside the existing `mcpServers` object.
 
@@ -345,8 +347,8 @@ Add to your MCP client configuration:
 {
   "mcpServers": {
     "podcast-generator": {
-      "url": "http://localhost:3000/mcp",
-      "transport": "streamable-http"
+      "command": "npx",
+      "args": ["mcp-remote", "http://localhost:3000/mcp"]
     }
   }
 }

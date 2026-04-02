@@ -84,13 +84,14 @@ app.use(express.json({ limit: '10mb' }));
 
 // Catch JSON body parse errors (malformed or oversized payload)
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-  if ((err as NodeJS.ErrnoException).type === 'entity.too.large') {
+  const httpErr = err as Error & { type?: string; status?: number };
+  if (httpErr.type === 'entity.too.large') {
     logger.error({ path: req.path }, 'Request body too large');
     res.status(413).json({ error: 'Request body too large (limit: 10mb)' });
     return;
   }
-  if ((err as NodeJS.ErrnoException).type === 'entity.parse.failed') {
-    logger.error({ path: req.path, err: err.message }, 'Invalid JSON body');
+  if (httpErr.type === 'entity.parse.failed') {
+    logger.error({ path: req.path, detail: err.message }, 'Invalid JSON body');
     res.status(400).json({ error: 'Invalid JSON body', detail: err.message });
     return;
   }

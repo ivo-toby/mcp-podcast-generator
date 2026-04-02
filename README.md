@@ -118,9 +118,19 @@ On success you'll get back the output path and duration:
 
 Your MP3 is in `./output/first-episode.mp3`.
 
-### 6. Connect an MCP client (optional)
+### 6. Install in Claude Desktop (optional)
 
-If you're using an MCP-aware client (e.g. Claude Desktop, Cursor), add the server to your MCP configuration:
+With the container running, add the server to Claude Desktop's MCP configuration.
+
+**Find your config file:**
+
+| OS | Path |
+|---|---|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
+**Add the server:**
 
 ```json
 {
@@ -133,7 +143,13 @@ If you're using an MCP-aware client (e.g. Claude Desktop, Cursor), add the serve
 }
 ```
 
-The `generate_podcast` tool will then be available directly from the chat interface.
+If you already have other MCP servers configured, add `podcast-generator` alongside them inside the existing `mcpServers` object.
+
+**Restart Claude Desktop.** The `generate_podcast` tool will appear in the tools panel. You can now ask Claude to generate a podcast directly:
+
+> *"Generate a 5-minute dual-host podcast about the future of open source, using Alex (Charon) and Sam (Aoede), with intro music from https://podcast.briefcast.online/assets/music/intro.mp3, and save it as open-source-ep1.mp3"*
+
+Claude will call the tool and return the output path when done.
 
 ## Environment Variables
 

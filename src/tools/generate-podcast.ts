@@ -123,9 +123,16 @@ export async function generatePodcast(
   const gemini = new GeminiTTSClient(googleApiKey, tempDir);
   const scriptText = formatScript(input.segments, input.type);
 
+  const estimatedMinutes = Math.max(1, Math.round(totalWords / 300));
   log.info(
-    { model: 'gemini-2.5-flash-preview-tts', type: input.type, chars: scriptText.length },
-    'Sending script to Gemini TTS — this can take a while for long scripts'
+    {
+      model: 'gemini-2.5-flash-preview-tts',
+      type: input.type,
+      chars: scriptText.length,
+      words: totalWords,
+      estimatedWait: `~${estimatedMinutes} min`,
+    },
+    'Sending script to Gemini TTS — no output until API responds, this is normal'
   );
   const ttsStart = Date.now();
 

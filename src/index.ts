@@ -81,7 +81,7 @@ app.post('/mcp', async (req, res) => {
     sessionIdGenerator: undefined, // stateless mode
   });
 
-  logger.debug({ method: req.body?.method }, 'MCP request received');
+  logger.info({ method: req.body?.method }, 'MCP request received');
 
   try {
     const server = createMcpServer();

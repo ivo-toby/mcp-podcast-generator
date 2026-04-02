@@ -3,6 +3,9 @@ import { writeFile } from 'fs/promises';
 import { mkdir } from 'fs/promises';
 import path from 'path';
 import { FFmpeg } from '../audio/ffmpeg.js';
+import { childLogger } from '../utils/logger.js';
+
+const log = childLogger('gemini-tts');
 
 export interface HostConfig {
   name: string;
@@ -32,6 +35,11 @@ export class GeminiTTSClient {
   ): Promise<void> {
     await mkdir(tempDir, { recursive: true });
 
+    log.info(
+      { host1: `${hosts[0].name}/${hosts[0].voice}`, host2: `${hosts[1].name}/${hosts[1].voice}` },
+      'Calling Gemini TTS (dual-host)'
+    );
+
     const speakerVoiceConfigs = hosts.map((host) => ({
       speaker: host.name,
       voiceConfig: {
@@ -52,10 +60,15 @@ export class GeminiTTSClient {
       } as unknown as Parameters<typeof this.genAI.getGenerativeModel>[0]['generationConfig'],
     });
 
+    const start = Date.now();
     const result = await modelInstance.generateContent(dialogueText);
+    log.info({ durationMs: Date.now() - start }, 'Gemini API responded');
+
     const audioData = this.extractAudioData(result);
+    log.debug({ bytes: Math.round(audioData.length * 0.75) }, 'Received PCM audio data, converting to MP3');
 
     await this.saveAudioToMp3(audioData, outputMp3Path, tempDir);
+    log.info({ outputMp3Path }, 'TTS audio saved');
   }
 
   /**
@@ -68,6 +81,8 @@ export class GeminiTTSClient {
     tempDir: string
   ): Promise<void> {
     await mkdir(tempDir, { recursive: true });
+
+    log.info({ host: `${host.name}/${host.voice}` }, 'Calling Gemini TTS (single-host)');
 
     const modelInstance = this.genAI.getGenerativeModel({
       model: this.model,
@@ -82,10 +97,15 @@ export class GeminiTTSClient {
       } as unknown as Parameters<typeof this.genAI.getGenerativeModel>[0]['generationConfig'],
     });
 
+    const start = Date.now();
     const result = await modelInstance.generateContent(text);
+    log.info({ durationMs: Date.now() - start }, 'Gemini API responded');
+
     const audioData = this.extractAudioData(result);
+    log.debug({ bytes: Math.round(audioData.length * 0.75) }, 'Received PCM audio data, converting to MP3');
 
     await this.saveAudioToMp3(audioData, outputMp3Path, tempDir);
+    log.info({ outputMp3Path }, 'TTS audio saved');
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -115,10 +135,13 @@ export class GeminiTTSClient {
     try {
       // Decode base64 PCM data and write to temp file
       const pcmBuffer = Buffer.from(base64AudioData, 'base64');
+      log.debug({ pcmBytes: pcmBuffer.length, pcmPath }, 'Writing PCM to disk');
       await writeFile(pcmPath, pcmBuffer);
 
       // Convert PCM (24kHz, 16-bit mono) to MP3
+      log.debug({ pcmPath, outputMp3Path }, 'Converting PCM → MP3 via FFmpeg');
       await this.ffmpeg.convertPcmToMp3(pcmPath, outputMp3Path);
+      log.debug('PCM → MP3 conversion done');
     } finally {
       const { unlink } = await import('fs/promises');
       await unlink(pcmPath).catch(() => {});

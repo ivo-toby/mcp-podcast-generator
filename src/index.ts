@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { mkdir } from 'fs/promises';
 import { generatePodcast, GeneratePodcastInput } from './tools/generate-podcast.js';
+import { logger } from './utils/logger.js';
 
 // Configuration from environment
 const config = {
@@ -13,7 +14,7 @@ const config = {
 };
 
 if (!config.googleApiKey) {
-  console.error('ERROR: GOOGLE_API_KEY environment variable is required');
+  logger.fatal('GOOGLE_API_KEY environment variable is required');
   process.exit(1);
 }
 
@@ -47,7 +48,7 @@ function createMcpServer(): McpServer {
         };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.error(`[generate_podcast] Error: ${message}`);
+        logger.error({ err }, '[generate_podcast] Tool error');
 
         return {
           content: [
@@ -80,13 +81,15 @@ app.post('/mcp', async (req, res) => {
     sessionIdGenerator: undefined, // stateless mode
   });
 
+  logger.debug({ method: req.body?.method }, 'MCP request received');
+
   try {
     const server = createMcpServer();
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[mcp] Transport error: ${message}`);
+    logger.error({ err }, 'MCP transport error');
     if (!res.headersSent) {
       res.status(500).json({ error: message });
     }
@@ -104,8 +107,8 @@ app.get('/mcp', (_req, res) => {
 });
 
 app.listen(config.port, () => {
-  console.log(`MCP Podcast Generator listening on port ${config.port}`);
-  console.log(`  Health: http://localhost:${config.port}/health`);
-  console.log(`  MCP:    http://localhost:${config.port}/mcp`);
-  console.log(`  Output: ${config.outputDir}`);
+  logger.info(
+    { port: config.port, outputDir: config.outputDir },
+    'MCP Podcast Generator started'
+  );
 });

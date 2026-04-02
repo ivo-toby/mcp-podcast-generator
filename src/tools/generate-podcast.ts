@@ -3,6 +3,9 @@ import path from 'path';
 import { z } from 'zod';
 import { GeminiTTSClient, formatScript } from '../tts/gemini-client.js';
 import { Assembler } from '../audio/assembler.js';
+import { childLogger } from '../utils/logger.js';
+
+const log = childLogger('generate-podcast');
 
 // Input schema
 export const GeneratePodcastInput = z.object({
@@ -102,10 +105,29 @@ export async function generatePodcast(
   const ttsOutputPath = path.join(tempDir, `tts-${ts}.mp3`);
   const outputPath = path.join(outputDir, input.outputFilename);
 
+  const totalWords = input.segments.reduce((n, s) => n + s.text.split(/\s+/).length, 0);
+
+  log.info(
+    {
+      type: input.type,
+      segments: input.segments.length,
+      words: totalWords,
+      hosts: input.hosts.map((h) => `${h.name} (${h.voice})`),
+      introMusic: !!input.introMusicUrl,
+      outroMusic: !!input.outroMusicUrl,
+      output: input.outputFilename,
+    },
+    'Starting podcast generation'
+  );
+
   const gemini = new GeminiTTSClient(googleApiKey, tempDir);
   const scriptText = formatScript(input.segments, input.type);
 
-  console.log(`[generate_podcast] Generating TTS audio (${input.type} host, ${input.segments.length} segments)...`);
+  log.info(
+    { model: 'gemini-2.5-flash-preview-tts', type: input.type, chars: scriptText.length },
+    'Sending script to Gemini TTS — this can take a while for long scripts'
+  );
+  const ttsStart = Date.now();
 
   try {
     // Generate TTS audio
@@ -120,7 +142,10 @@ export async function generatePodcast(
       await gemini.generateSingleHost(scriptText, input.hosts[0], ttsOutputPath, tempDir);
     }
 
-    console.log(`[generate_podcast] TTS complete. Assembling episode...`);
+    log.info({ durationMs: Date.now() - ttsStart }, 'Gemini TTS complete');
+
+    log.info('Assembling episode (normalize + music + concat + final normalize)');
+    const assembleStart = Date.now();
 
     // Assemble with optional music + normalization
     const assembler = new Assembler(tempDir);
@@ -134,8 +159,13 @@ export async function generatePodcast(
       targetLufs: input.targetLufs,
     });
 
-    console.log(
-      `[generate_podcast] Done. Output: ${result.outputPath} (${result.durationSeconds.toFixed(1)}s)`
+    log.info(
+      {
+        outputPath: result.outputPath,
+        durationSeconds: result.durationSeconds.toFixed(1),
+        assembleMs: Date.now() - assembleStart,
+      },
+      'Podcast generation complete'
     );
 
     return {

@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { mkdir } from 'fs/promises';
@@ -19,8 +19,13 @@ if (!config.googleApiKey) {
 }
 
 // Ensure output and temp dirs exist
-await mkdir(config.outputDir, { recursive: true });
-await mkdir(config.tempDir, { recursive: true });
+try {
+  await mkdir(config.outputDir, { recursive: true });
+  await mkdir(config.tempDir, { recursive: true });
+} catch (err) {
+  logger.fatal({ err, outputDir: config.outputDir, tempDir: config.tempDir }, 'Failed to create required directories');
+  process.exit(1);
+}
 
 // Factory: create a fresh McpServer per request (stateless mode requires this)
 function createMcpServer(): McpServer {
@@ -68,7 +73,29 @@ function createMcpServer(): McpServer {
 
 // Create Express app
 const app = express();
+
+// Log every incoming request before body parsing so we always see it
+app.use((req, _res, next) => {
+  logger.info({ method: req.method, path: req.path, contentLength: req.headers['content-length'] }, 'Incoming request');
+  next();
+});
+
 app.use(express.json({ limit: '10mb' }));
+
+// Catch JSON body parse errors (malformed or oversized payload)
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+  if ((err as NodeJS.ErrnoException).type === 'entity.too.large') {
+    logger.error({ path: req.path }, 'Request body too large');
+    res.status(413).json({ error: 'Request body too large (limit: 10mb)' });
+    return;
+  }
+  if ((err as NodeJS.ErrnoException).type === 'entity.parse.failed') {
+    logger.error({ path: req.path, err: err.message }, 'Invalid JSON body');
+    res.status(400).json({ error: 'Invalid JSON body', detail: err.message });
+    return;
+  }
+  next(err);
+});
 
 // Health check
 app.get('/health', (_req, res) => {
@@ -81,7 +108,7 @@ app.post('/mcp', async (req, res) => {
     sessionIdGenerator: undefined, // stateless mode
   });
 
-  logger.info({ method: req.body?.method }, 'MCP request received');
+  logger.info({ tool: req.body?.params?.name }, 'MCP tool call received');
 
   try {
     const server = createMcpServer();

@@ -21,46 +21,49 @@ if (!config.googleApiKey) {
 await mkdir(config.outputDir, { recursive: true });
 await mkdir(config.tempDir, { recursive: true });
 
-// Create MCP server
-const server = new McpServer({
-  name: 'podcast-generator',
-  version: '1.0.0',
-});
+// Factory: create a fresh McpServer per request (stateless mode requires this)
+function createMcpServer(): McpServer {
+  const server = new McpServer({
+    name: 'podcast-generator',
+    version: '1.0.0',
+  });
 
-// Register the generate_podcast tool
-server.tool(
-  'generate_podcast',
-  'Generate a podcast MP3 from a script using Google Gemini TTS. Supports single-host monologue and dual-host dialogue formats. Optionally adds intro/outro music from URLs and applies EBU R128 loudness normalization.',
-  GeneratePodcastInput.shape,
-  async (input) => {
-    try {
-      const validated = GeneratePodcastInput.parse(input);
-      const result = await generatePodcast(validated, config);
+  server.tool(
+    'generate_podcast',
+    'Generate a podcast MP3 from a script using Google Gemini TTS. Supports single-host monologue and dual-host dialogue formats. Optionally adds intro/outro music from URLs and applies EBU R128 loudness normalization.',
+    GeneratePodcastInput.shape,
+    async (input) => {
+      try {
+        const validated = GeneratePodcastInput.parse(input);
+        const result = await generatePodcast(validated, config);
 
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[generate_podcast] Error: ${message}`);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[generate_podcast] Error: ${message}`);
 
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: message }, null, 2),
-          },
-        ],
-        isError: true,
-      };
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({ success: false, error: message }, null, 2),
+            },
+          ],
+          isError: true,
+        };
+      }
     }
-  }
-);
+  );
+
+  return server;
+}
 
 // Create Express app
 const app = express();
@@ -71,13 +74,14 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'mcp-podcast-generator', version: '1.0.0' });
 });
 
-// MCP endpoint (Streamable HTTP transport)
+// MCP endpoint (Streamable HTTP transport — one server instance per request)
 app.post('/mcp', async (req, res) => {
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless mode
   });
 
   try {
+    const server = createMcpServer();
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (err) {
@@ -86,6 +90,8 @@ app.post('/mcp', async (req, res) => {
     if (!res.headersSent) {
       res.status(500).json({ error: message });
     }
+  } finally {
+    await transport.close();
   }
 });
 

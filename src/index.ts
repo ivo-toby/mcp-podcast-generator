@@ -37,7 +37,7 @@ function createMcpServer(): McpServer {
 
   server.tool(
     'generate_podcast',
-    'Generate a podcast MP3 from a script using Google Gemini TTS. Supports single-host monologue and dual-host dialogue formats. Optionally adds intro/outro music from URLs and applies EBU R128 loudness normalization.',
+    'Generate a podcast MP3 from a script using Google Gemini TTS. Supports single-host monologue and dual-host dialogue formats. Optionally adds intro/outro music from URLs and applies EBU R128 loudness normalization. IMPORTANT: This tool takes a long time to run (typically 2-10 minutes depending on script length) because it synthesizes speech for every segment and assembles the final audio. Do NOT assume it has timed out — wait for the response to complete.',
     GeneratePodcastInput.shape,
     async (input) => {
       try {

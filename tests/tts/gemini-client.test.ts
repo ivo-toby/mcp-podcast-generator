@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { formatScript } from '../../src/tts/gemini-client.js';
+import { formatScript, chunkDialogue, chunkMonologue } from '../../src/tts/gemini-client.js';
 
 // ---------------------------------------------------------------------------
 // formatScript — pure function tests
@@ -54,6 +54,74 @@ describe('formatScript', () => {
     it('handles a single segment', () => {
       expect(formatScript([{ speaker: 'Alex', text: 'Just me.' }], 'dual')).toBe('Alex: Just me.');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// chunkDialogue / chunkMonologue — keep each TTS call inside Gemini's
+// ~5min/quality envelope by capping spoken-word count per chunk.
+// ---------------------------------------------------------------------------
+
+describe('chunkDialogue', () => {
+  it('returns a single chunk when total words are under the budget', () => {
+    const dialogue = 'Alex: Hi.\nSam: Hello there.';
+    expect(chunkDialogue(dialogue, 250)).toEqual([dialogue]);
+  });
+
+  it('returns an empty array for empty input', () => {
+    expect(chunkDialogue('', 250)).toEqual([]);
+    expect(chunkDialogue('   \n  \n', 250)).toEqual([]);
+  });
+
+  it('splits at speaker-turn boundaries when budget is exceeded', () => {
+    const lines = [
+      'Alex: ' + 'word '.repeat(34).trim(),
+      'Sam: ' + 'word '.repeat(34).trim(),
+      'Alex: ' + 'word '.repeat(34).trim(),
+      'Sam: ' + 'word '.repeat(34).trim(),
+    ];
+    const chunks = chunkDialogue(lines.join('\n'), 80);
+    // Each line is 35 words; 80-word budget fits 2 lines (70w) but not 3 (105w)
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0].split('\n')).toHaveLength(2);
+    expect(chunks[1].split('\n')).toHaveLength(2);
+  });
+
+  it('emits an over-budget single line as its own chunk rather than splitting mid-utterance', () => {
+    const longLine = 'Alex: ' + 'word '.repeat(300).trim();
+    const shortLine = 'Sam: short reply.';
+    const chunks = chunkDialogue([longLine, shortLine].join('\n'), 100);
+    expect(chunks[0]).toBe(longLine);
+    expect(chunks[chunks.length - 1]).toBe(shortLine);
+  });
+});
+
+describe('chunkMonologue', () => {
+  it('returns a single chunk when total words are under the budget', () => {
+    const text = 'Hello and welcome.\n\nToday we cover AI.';
+    expect(chunkMonologue(text, 250)).toEqual([text]);
+  });
+
+  it('returns an empty array for empty input', () => {
+    expect(chunkMonologue('', 250)).toEqual([]);
+  });
+
+  it('splits at paragraph boundaries when budget is exceeded', () => {
+    const para = (n: number) => `paragraph${n} ` + 'word '.repeat(34).trim();
+    const text = [para(1), para(2), para(3), para(4)].join('\n\n');
+    const chunks = chunkMonologue(text, 80);
+    // Each paragraph 35 words, budget 80 -> 2 paragraphs per chunk
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0].split(/\n\n+/)).toHaveLength(2);
+  });
+
+  it('falls back to sentence-level splitting for an over-budget paragraph', () => {
+    // Single paragraph, no \n\n separators, 200 words total in 4 sentences.
+    const sentence = 'word '.repeat(50).trim() + '.';
+    const text = [sentence, sentence, sentence, sentence].join(' ');
+    const chunks = chunkMonologue(text, 80);
+    // 4 sentences x 51 words each, budget 80 -> 1 sentence per chunk
+    expect(chunks.length).toBeGreaterThan(1);
   });
 });
 
@@ -171,6 +239,45 @@ describe('GeminiTTSClient', () => {
     await expect(
       client.generateSingleHost('Hi', { name: 'Alex', voice: 'Charon' }, '/tmp/out.mp3', '/tmp/test')
     ).rejects.toThrow('Gemini TTS returned no audio data in response parts');
+  });
+
+  it('chunks long scripts into multiple TTS calls to stay inside the quality envelope', async () => {
+    const { GeminiTTSClient } = await import('../../src/tts/gemini-client.js');
+    mockGenerateContent.mockResolvedValue(
+      makeAudioResponse(Buffer.from('pcm-data').toString('base64'))
+    );
+
+    // 8 paragraphs of 200 words each = 1600 words; 250-word budget -> >1 chunk
+    const paragraph = 'word '.repeat(200).trim() + '.';
+    const longText = Array(8).fill(paragraph).join('\n\n');
+    const client = new GeminiTTSClient('test-api-key', '/tmp/test');
+    await client.generateSingleHost(longText, { name: 'Alex', voice: 'Kore' }, '/tmp/out.mp3', '/tmp/test');
+
+    // Should call the TTS API multiple times rather than blasting the whole script in one go
+    expect(mockGenerateContent.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('concatenates audio across multiple inlineData parts in a single response', async () => {
+    const { GeminiTTSClient } = await import('../../src/tts/gemini-client.js');
+    mockGenerateContent.mockResolvedValue({
+      response: {
+        candidates: [
+          {
+            content: {
+              parts: [
+                { inlineData: { data: Buffer.from('AAAA').toString('base64') } },
+                { inlineData: { data: Buffer.from('BBBB').toString('base64') } },
+              ],
+            },
+          },
+        ],
+      },
+    });
+
+    const client = new GeminiTTSClient('test-api-key', '/tmp/test');
+    // Should not throw — both parts are accepted and concatenated
+    await client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.mp3', '/tmp/test');
+    expect(mockGenerateContent).toHaveBeenCalledOnce();
   });
 
   it('uses a custom model when specified', async () => {

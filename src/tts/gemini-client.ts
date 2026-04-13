@@ -12,6 +12,17 @@ export interface HostConfig {
   voice: string;
 }
 
+/**
+ * Gemini 2.5 TTS hard-stops audio generation at ~5:27 per call and the audio
+ * quality progressively degrades as the model approaches that limit (audible
+ * pumping, clipping, "underwater" artifacts in the final minute or two).
+ *
+ * To stay safely inside the high-quality envelope we chunk the script so each
+ * single API call produces roughly 60-90 seconds of speech. At ~165 WPM that
+ * translates to ~250 spoken words per chunk.
+ */
+const CHUNK_TARGET_WORDS = 250;
+
 export class GeminiTTSClient {
   private readonly genAI: GoogleGenerativeAI;
   private readonly model: string;
@@ -60,14 +71,9 @@ export class GeminiTTSClient {
       } as unknown as Parameters<typeof this.genAI.getGenerativeModel>[0]['generationConfig'],
     });
 
-    const start = Date.now();
-    const result = await modelInstance.generateContent(dialogueText);
-    log.info({ durationMs: Date.now() - start }, 'Gemini API responded');
-
-    const audioData = this.extractAudioData(result);
-    log.debug({ bytes: Math.round(audioData.length * 0.75) }, 'Received PCM audio data, converting to MP3');
-
-    await this.saveAudioToMp3(audioData, outputMp3Path, tempDir);
+    const chunks = chunkDialogue(dialogueText);
+    const pcm = await this.generatePcmInChunks(modelInstance, chunks);
+    await this.savePcmAsMp3(pcm, outputMp3Path, tempDir);
     log.info({ outputMp3Path }, 'TTS audio saved');
   }
 
@@ -97,35 +103,82 @@ export class GeminiTTSClient {
       } as unknown as Parameters<typeof this.genAI.getGenerativeModel>[0]['generationConfig'],
     });
 
-    const start = Date.now();
-    const result = await modelInstance.generateContent(text);
-    log.info({ durationMs: Date.now() - start }, 'Gemini API responded');
-
-    const audioData = this.extractAudioData(result);
-    log.debug({ bytes: Math.round(audioData.length * 0.75) }, 'Received PCM audio data, converting to MP3');
-
-    await this.saveAudioToMp3(audioData, outputMp3Path, tempDir);
+    const chunks = chunkMonologue(text);
+    const pcm = await this.generatePcmInChunks(modelInstance, chunks);
+    await this.savePcmAsMp3(pcm, outputMp3Path, tempDir);
     log.info({ outputMp3Path }, 'TTS audio saved');
   }
 
+  /**
+   * Call Gemini once per chunk and concatenate the raw PCM responses.
+   * Concatenating at the PCM level (rather than re-encoding each chunk to MP3
+   * and stitching) avoids generational lossy-codec damage and frame-boundary
+   * clicks between chunks.
+   */
+  private async generatePcmInChunks(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    modelInstance: any,
+    chunks: string[]
+  ): Promise<Buffer> {
+    if (chunks.length === 0) {
+      // The zod schema allows whitespace-only text via z.string().min(1), which
+      // chunk{Dialogue,Monologue} collapse to an empty array. Fail loudly here
+      // rather than letting an empty PCM buffer reach ffmpeg.
+      throw new Error('Cannot synthesize empty script \u2014 no spoken content provided');
+    }
+
+    log.info({ chunks: chunks.length }, 'Generating TTS in chunks (each call stays inside Gemini\u2019s ~5min/quality envelope)');
+
+    const pcmParts: Buffer[] = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const start = Date.now();
+      const result = await modelInstance.generateContent(chunks[i]);
+      const pcm = this.extractAllPcmAudio(result);
+      log.info(
+        {
+          chunk: i + 1,
+          of: chunks.length,
+          words: chunks[i].split(/\s+/).length,
+          pcmBytes: pcm.length,
+          durationMs: Date.now() - start,
+        },
+        'Chunk synthesized'
+      );
+      pcmParts.push(pcm);
+    }
+
+    return Buffer.concat(pcmParts);
+  }
+
+  /**
+   * Extract every PCM audio buffer from a Gemini response. A single response
+   * may carry the audio across multiple `inlineData` parts; concatenating them
+   * is required to avoid silently dropping the tail of the audio.
+   */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private extractAudioData(result: any): string {
+  private extractAllPcmAudio(result: any): Buffer {
     const parts = result.response?.candidates?.[0]?.content?.parts;
     if (!parts || parts.length === 0) {
       throw new Error('Gemini TTS returned no content parts');
     }
 
+    const buffers: Buffer[] = [];
     for (const part of parts) {
-      if (part?.inlineData?.data) {
-        return part.inlineData.data as string;
+      const data = part?.inlineData?.data;
+      if (typeof data === 'string' && data.length > 0) {
+        buffers.push(Buffer.from(data, 'base64'));
       }
     }
 
-    throw new Error('Gemini TTS returned no audio data in response parts');
+    if (buffers.length === 0) {
+      throw new Error('Gemini TTS returned no audio data in response parts');
+    }
+
+    return Buffer.concat(buffers);
   }
 
-  private async saveAudioToMp3(
-    base64AudioData: string,
+  private async savePcmAsMp3(
+    pcmBuffer: Buffer,
     outputMp3Path: string,
     tempDir: string
   ): Promise<void> {
@@ -133,15 +186,12 @@ export class GeminiTTSClient {
     const pcmPath = path.join(tempDir, `gemini-raw-${ts}.pcm`);
 
     try {
-      // Decode base64 PCM data and write to temp file
-      const pcmBuffer = Buffer.from(base64AudioData, 'base64');
-      log.debug({ pcmBytes: pcmBuffer.length, pcmPath }, 'Writing PCM to disk');
+      log.debug({ pcmBytes: pcmBuffer.length, pcmPath }, 'Writing combined PCM to disk');
       await writeFile(pcmPath, pcmBuffer);
 
-      // Convert PCM (24kHz, 16-bit mono) to MP3
-      log.debug({ pcmPath, outputMp3Path }, 'Converting PCM → MP3 via FFmpeg');
+      log.debug({ pcmPath, outputMp3Path }, 'Converting PCM \u2192 MP3 via FFmpeg');
       await this.ffmpeg.convertPcmToMp3(pcmPath, outputMp3Path);
-      log.debug('PCM → MP3 conversion done');
+      log.debug('PCM \u2192 MP3 conversion done');
     } finally {
       const { unlink } = await import('fs/promises');
       await unlink(pcmPath).catch(() => {});
@@ -162,4 +212,122 @@ export function formatScript(
     return segments.map((s) => s.text).join('\n\n');
   }
   return segments.map((s) => `${s.speaker}: ${s.text}`).join('\n');
+}
+
+/**
+ * Split a dual-host dialogue (one "Speaker: text" per line) into chunks that
+ * each contain at most CHUNK_TARGET_WORDS words. Splits only on speaker-turn
+ * boundaries so prosody is preserved within a single utterance.
+ */
+export function chunkDialogue(
+  dialogueText: string,
+  targetWords: number = CHUNK_TARGET_WORDS
+): string[] {
+  const lines = dialogueText.split('\n').filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return [];
+  return groupByWordBudget(lines, '\n', targetWords);
+}
+
+/**
+ * Split a single-host monologue (paragraphs separated by blank lines) into
+ * chunks that each contain at most CHUNK_TARGET_WORDS words. Paragraphs that
+ * are themselves over budget are subdivided at sentence boundaries so a
+ * caller passing one giant segment still gets safe-sized chunks.
+ *
+ * Sentences from an over-budget paragraph are emitted as their own chunks
+ * (joined by spaces) rather than being folded back into the paragraph-level
+ * grouper — otherwise they would be rejoined across chunks with "\n\n", which
+ * introduces paragraph-sized pauses that change pacing/prosody mid-paragraph.
+ */
+export function chunkMonologue(
+  text: string,
+  targetWords: number = CHUNK_TARGET_WORDS
+): string[] {
+  const paragraphs = text.split(/\n{2,}/).filter((p) => p.trim().length > 0);
+  if (paragraphs.length === 0) return [];
+
+  const result: string[] = [];
+  let buffer: string[] = [];
+  let bufferWords = 0;
+
+  const flush = () => {
+    if (buffer.length > 0) {
+      result.push(buffer.join('\n\n'));
+      buffer = [];
+      bufferWords = 0;
+    }
+  };
+
+  for (const para of paragraphs) {
+    const wordCount = para.trim().split(/\s+/).length;
+
+    if (wordCount > targetWords) {
+      // Oversized paragraph: emit any buffered paragraphs, then emit this
+      // paragraph's sentence-split sub-chunks directly so they keep intra-
+      // paragraph spacing.
+      flush();
+      for (const sub of splitParagraphBySentence(para, targetWords)) {
+        result.push(sub);
+      }
+      continue;
+    }
+
+    if (bufferWords + wordCount > targetWords && buffer.length > 0) {
+      flush();
+    }
+    buffer.push(para);
+    bufferWords += wordCount;
+  }
+
+  flush();
+  return result;
+}
+
+function splitParagraphBySentence(paragraph: string, targetWords: number): string[] {
+  // Keep the terminating punctuation attached to each sentence.
+  const sentences = paragraph.match(/[^.!?]+[.!?]+(\s+|$)|[^.!?]+$/g);
+  if (!sentences || sentences.length <= 1) {
+    // No sentence boundaries to split on — return as-is and let it be its own
+    // (over-budget) chunk. Better to send a long line than to slice mid-word.
+    return [paragraph];
+  }
+  return groupByWordBudget(
+    sentences.map((s) => s.trim()).filter((s) => s.length > 0),
+    ' ',
+    targetWords
+  );
+}
+
+function groupByWordBudget(units: string[], joiner: string, targetWords: number): string[] {
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let currentWords = 0;
+
+  for (const unit of units) {
+    const words = unit.trim().split(/\s+/).length;
+    // If this single unit alone exceeds the budget, emit it as its own chunk
+    // (rather than splitting mid-sentence which would break prosody).
+    if (words >= targetWords) {
+      if (current.length > 0) {
+        chunks.push(current.join(joiner));
+        current = [];
+        currentWords = 0;
+      }
+      chunks.push(unit);
+      continue;
+    }
+
+    if (currentWords + words > targetWords && current.length > 0) {
+      chunks.push(current.join(joiner));
+      current = [];
+      currentWords = 0;
+    }
+    current.push(unit);
+    currentWords += words;
+  }
+
+  if (current.length > 0) {
+    chunks.push(current.join(joiner));
+  }
+  return chunks;
 }

@@ -120,6 +120,13 @@ export class GeminiTTSClient {
     modelInstance: any,
     chunks: string[]
   ): Promise<Buffer> {
+    if (chunks.length === 0) {
+      // The zod schema allows whitespace-only text via z.string().min(1), which
+      // chunk{Dialogue,Monologue} collapse to an empty array. Fail loudly here
+      // rather than letting an empty PCM buffer reach ffmpeg.
+      throw new Error('Cannot synthesize empty script \u2014 no spoken content provided');
+    }
+
     log.info({ chunks: chunks.length }, 'Generating TTS in chunks (each call stays inside Gemini\u2019s ~5min/quality envelope)');
 
     const pcmParts: Buffer[] = [];
@@ -226,6 +233,11 @@ export function chunkDialogue(
  * chunks that each contain at most CHUNK_TARGET_WORDS words. Paragraphs that
  * are themselves over budget are subdivided at sentence boundaries so a
  * caller passing one giant segment still gets safe-sized chunks.
+ *
+ * Sentences from an over-budget paragraph are emitted as their own chunks
+ * (joined by spaces) rather than being folded back into the paragraph-level
+ * grouper — otherwise they would be rejoined across chunks with "\n\n", which
+ * introduces paragraph-sized pauses that change pacing/prosody mid-paragraph.
  */
 export function chunkMonologue(
   text: string,
@@ -234,16 +246,41 @@ export function chunkMonologue(
   const paragraphs = text.split(/\n{2,}/).filter((p) => p.trim().length > 0);
   if (paragraphs.length === 0) return [];
 
-  const units: string[] = [];
+  const result: string[] = [];
+  let buffer: string[] = [];
+  let bufferWords = 0;
+
+  const flush = () => {
+    if (buffer.length > 0) {
+      result.push(buffer.join('\n\n'));
+      buffer = [];
+      bufferWords = 0;
+    }
+  };
+
   for (const para of paragraphs) {
     const wordCount = para.trim().split(/\s+/).length;
-    if (wordCount <= targetWords) {
-      units.push(para);
-    } else {
-      units.push(...splitParagraphBySentence(para, targetWords));
+
+    if (wordCount > targetWords) {
+      // Oversized paragraph: emit any buffered paragraphs, then emit this
+      // paragraph's sentence-split sub-chunks directly so they keep intra-
+      // paragraph spacing.
+      flush();
+      for (const sub of splitParagraphBySentence(para, targetWords)) {
+        result.push(sub);
+      }
+      continue;
     }
+
+    if (bufferWords + wordCount > targetWords && buffer.length > 0) {
+      flush();
+    }
+    buffer.push(para);
+    bufferWords += wordCount;
   }
-  return groupByWordBudget(units, '\n\n', targetWords);
+
+  flush();
+  return result;
 }
 
 function splitParagraphBySentence(paragraph: string, targetWords: number): string[] {

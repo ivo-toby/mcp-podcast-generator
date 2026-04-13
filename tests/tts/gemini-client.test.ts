@@ -123,6 +123,36 @@ describe('chunkMonologue', () => {
     // 4 sentences x 51 words each, budget 80 -> 1 sentence per chunk
     expect(chunks.length).toBeGreaterThan(1);
   });
+
+  it('joins sentence sub-chunks with spaces, not paragraph breaks', () => {
+    // One over-budget paragraph (2 sentences, 60 words each = 120 words, budget 80).
+    // Each sentence fits, so each becomes its own chunk — but the joiner between
+    // sub-chunks must not introduce \n\n paragraph pauses within what was
+    // originally a single paragraph.
+    const sentence = (tag: string) => tag + ' ' + 'word '.repeat(58).trim() + '.';
+    const para = [sentence('A'), sentence('B')].join(' ');
+    const chunks = chunkMonologue(para, 80);
+    for (const chunk of chunks) {
+      expect(chunk).not.toContain('\n\n');
+    }
+  });
+
+  it('does not merge sentence sub-chunks with adjacent short paragraphs via \\n\\n', () => {
+    // Oversize paragraph followed by a short one. The short paragraph must not
+    // be appended to a sentence sub-chunk using \n\n.
+    const longSentence = 'word '.repeat(90).trim() + '.';
+    const shortPara = 'short tail paragraph.';
+    const text = `${longSentence}\n\n${shortPara}`;
+    const chunks = chunkMonologue(text, 80);
+    // None of the chunks should fuse the oversize-paragraph output with the
+    // short paragraph via a paragraph break.
+    for (const chunk of chunks) {
+      if (chunk.includes(shortPara) && chunk.includes('word')) {
+        // Short paragraph cohabiting with sentence content -> bug
+        expect(chunk).not.toContain('\n\n');
+      }
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -217,6 +247,18 @@ describe('GeminiTTSClient', () => {
     expect(speakerConfigs).toHaveLength(2);
     expect(speakerConfigs[0]).toMatchObject({ speaker: 'Alex', voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } } });
     expect(speakerConfigs[1]).toMatchObject({ speaker: 'Sam', voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } });
+  });
+
+  it('throws a clear error when the script is whitespace-only (zero chunks)', async () => {
+    const { GeminiTTSClient } = await import('../../src/tts/gemini-client.js');
+    const client = new GeminiTTSClient('test-api-key', '/tmp/test');
+
+    await expect(
+      client.generateSingleHost('   \n  \n ', { name: 'Alex', voice: 'Kore' }, '/tmp/out.mp3', '/tmp/test')
+    ).rejects.toThrow(/empty script/i);
+
+    // Must NOT have called the TTS API or written anything with empty PCM
+    expect(mockGenerateContent).not.toHaveBeenCalled();
   });
 
   it('throws when Gemini returns no candidates', async () => {

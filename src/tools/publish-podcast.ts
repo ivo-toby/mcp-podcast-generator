@@ -317,26 +317,38 @@ async function executePublish(
         // RSS fallback: construct URL from publishPublicUrl.
         // Reject loopback/localhost hosts — they are unreachable from podcast clients.
         let normalizedUrl = opts.publishPublicUrl.replace(/\/+$/, '');
-        let isLoopback = false;
-        try {
-          const parsed = new URL(normalizedUrl);
-          const normalizedHostname = parsed.hostname.replace(/^\[/, '').replace(/\]$/, '');
-          if (['localhost', '127.0.0.1', '::1'].includes(normalizedHostname)) {
-            isLoopback = true;
-          }
-        } catch { /* already invalid, caught below */ }
-        if (isLoopback) {
-          rssResult = { status: 'failed', errorCode: 'rss_missing_media_url', errorMessage: 'publishPublicUrl is a loopback address — required for RSS enclosure URLs' };
-        } else if (!normalizedUrl) {
+        let isInvalid = false;
+        if (!normalizedUrl) {
           rssResult = { status: 'failed', errorCode: 'rss_missing_media_url', errorMessage: 'publishPublicUrl is empty or only slashes' };
         } else {
-          const encodedFilename = encodeURIComponent(filename);
-          const rssMediaAsset = {
-            url: `${normalizedUrl}/output/${encodedFilename}`,
-            lengthBytes: fileSizeBytes,
-            mimeType: 'audio/mpeg',
-          };
-          mediaAsset = rssMediaAsset;
+          try {
+            const parsed = new URL(normalizedUrl);
+            // Only allow http/https protocols
+            if (!['http:', 'https:'].includes(parsed.protocol)) {
+              isInvalid = true;
+            } else {
+              const h = parsed.hostname.replace(/^\[/, '').replace(/\]$/, '');
+              // Detect full loopback range: localhost, 127.x.x.x, ::1, fe80::, 0.0.0.0
+              if (h === 'localhost' || h === '::1' || h === 'fe80::' || h === '0.0.0.0') {
+                isInvalid = true;
+              } else if (/^127\./.test(h)) {
+                isInvalid = true;
+              }
+            }
+          } catch {
+            isInvalid = true;
+          }
+          if (isInvalid) {
+            rssResult = { status: 'failed', errorCode: 'rss_missing_media_url', errorMessage: 'publishPublicUrl is invalid or a loopback address — required for RSS enclosure URLs' };
+          } else {
+            const encodedFilename = encodeURIComponent(filename);
+            const rssMediaAsset = {
+              url: `${normalizedUrl}/output/${encodedFilename}`,
+              lengthBytes: fileSizeBytes,
+              mimeType: 'audio/mpeg',
+            };
+            mediaAsset = rssMediaAsset;
+          }
         }
       } else {
         // No S3 and no publishPublicUrl — RSS has no valid MediaAsset

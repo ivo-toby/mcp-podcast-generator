@@ -213,7 +213,8 @@ async function executePublish(
   let mediaAsset: { url: string; lengthBytes: number; mimeType: string } | undefined;
   if (opts.hasStorage) {
     try {
-      mediaAsset = await opts.storage.upload(filename, candidatePath);
+      const s3Key = `episodes/${filename}`;
+      mediaAsset = await opts.storage.upload(candidatePath, s3Key);
       // Override the URL with publishPublicUrl-based URL (spec requirement).
       const normalizedPublicUrl = opts.publishPublicUrl?.replace(/\/+$/, '') ?? '';
       if (normalizedPublicUrl) {

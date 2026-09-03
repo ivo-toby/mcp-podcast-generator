@@ -329,10 +329,11 @@ describe('publish_podcast handler', () => {
         publishPublicUrl: 'http://[::1]:3000',
       });
       const result = await handler({
-        outputFilename: 'test.mp3',
+        outputFilename: 'test_loopback_v6.mp3',
         episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
       });
       expect(result.success).toBe(false);
+      expect(result.stages.rss.errorCode).toBe('rss_missing_media_url');
       fs.unlinkSync(f);
     });
 
@@ -344,10 +345,11 @@ describe('publish_podcast handler', () => {
         publishPublicUrl: 'http://localhost:3000',
       });
       const result = await handler({
-        outputFilename: 'test.mp3',
+        outputFilename: 'test_loopback_localhost.mp3',
         episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
       });
       expect(result.success).toBe(false);
+      expect(result.stages.rss.errorCode).toBe('rss_missing_media_url');
       fs.unlinkSync(f);
     });
 
@@ -359,10 +361,11 @@ describe('publish_podcast handler', () => {
         publishPublicUrl: 'http://127.0.0.2:3000',
       });
       const result = await handler({
-        outputFilename: 'test.mp3',
+        outputFilename: 'test_loopback_127.mp3',
         episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
       });
       expect(result.success).toBe(false);
+      expect(result.stages.rss.errorCode).toBe('rss_missing_media_url');
       fs.unlinkSync(f);
     });
 
@@ -374,10 +377,11 @@ describe('publish_podcast handler', () => {
         publishPublicUrl: 'http://127.0.0.1:3000',
       });
       const result = await handler({
-        outputFilename: 'test.mp3',
+        outputFilename: 'test_loopback_127_1.mp3',
         episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
       });
       expect(result.success).toBe(false);
+      expect(result.stages.rss.errorCode).toBe('rss_missing_media_url');
       fs.unlinkSync(f);
     });
 
@@ -389,10 +393,11 @@ describe('publish_podcast handler', () => {
         publishPublicUrl: 'http://[fe80::1]:3000',
       });
       const result = await handler({
-        outputFilename: 'test.mp3',
+        outputFilename: 'test_loopback_fe80.mp3',
         episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
       });
       expect(result.success).toBe(false);
+      expect(result.stages.rss.errorCode).toBe('rss_missing_media_url');
       fs.unlinkSync(f);
     });
 
@@ -404,10 +409,11 @@ describe('publish_podcast handler', () => {
         publishPublicUrl: 'http://0.0.0.0:3000',
       });
       const result = await handler({
-        outputFilename: 'test.mp3',
+        outputFilename: 'test_loopback_000.mp3',
         episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
       });
       expect(result.success).toBe(false);
+      expect(result.stages.rss.errorCode).toBe('rss_missing_media_url');
       fs.unlinkSync(f);
     });
 
@@ -419,10 +425,11 @@ describe('publish_podcast handler', () => {
         publishPublicUrl: 'not-a-url',
       });
       const result = await handler({
-        outputFilename: 'test.mp3',
+        outputFilename: 'test_malformed.mp3',
         episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
       });
       expect(result.success).toBe(false);
+      expect(result.stages.rss.errorCode).toBe('rss_missing_media_url');
       fs.unlinkSync(f);
     });
 
@@ -434,10 +441,11 @@ describe('publish_podcast handler', () => {
         publishPublicUrl: 'ftp://cdn.example.com',
       });
       const result = await handler({
-        outputFilename: 'test.mp3',
+        outputFilename: 'test_ftp.mp3',
         episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
       });
       expect(result.success).toBe(false);
+      expect(result.stages.rss.errorCode).toBe('rss_missing_media_url');
       fs.unlinkSync(f);
     });
 
@@ -458,27 +466,27 @@ describe('publish_podcast handler', () => {
   });
 
   describe('stat probe failure', () => {
-    it('returns probe_stat_failed when stat fails on resolved path', async () => {
-      // Create a broken symlink so stat fails on the resolved path
-      const f = mkFile('test_stat_fail.mp3');
-      fs.unlinkSync(f);
-      // Create a symlink to a non-existent target — realpath and stat both fail
-      const brokenLink = '/tmp/test_stat_fail_link.mp3';
-      try { fs.unlinkSync(brokenLink); } catch {}
-      fs.symlinkSync('/nonexistent_target.mp3', brokenLink);
+    it('returns probe_stat_failed when statSync fails on resolved path', async () => {
+      const f = mkFile('test_stat_probe.mp3');
+      vi.spyOn(fs, 'statSync').mockImplementation(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
       const handler = mkHandler({
         feed: mkFeed(mockFeed),
         s3: { bucket: 'b', publicUrl: 'https://cdn.example.com' },
         publishPublicUrl: 'https://cdn.example.com',
       });
       const result = await handler({
-        outputFilename: 'test_stat_fail_link.mp3',
+        outputFilename: 'test_stat_probe.mp3',
         episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
       });
-      // Broken symlink → realpathSync fails → file_not_found (expected, since realpath fails before stat probe check)
       expect(result.success).toBe(false);
-      expect(result.errorCode).toBe('file_not_found');
-      fs.unlinkSync(brokenLink);
+      expect(result.errorCode).toBe('probe_stat_failed');
+      expect(result.stages.s3.status).toBe('skipped');
+      expect(result.stages.s3.reason).toBe('stat_failed');
+      expect(result).toHaveProperty('probeStatFailed', true);
+      vi.restoreAllMocks();
+      fs.unlinkSync(f);
     });
   });
 

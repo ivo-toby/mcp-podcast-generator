@@ -4,9 +4,9 @@ import type { StorageBackend } from '../../src/storage/storage-types.js';
 import type { FeedBackend } from '../../src/feed/feed-types.js';
 import {
   createPublishHandler,
+  PublishPodcastInput,
   type RssConfig,
 } from '../../src/tools/publish-podcast.js';
-import type { PublishPodcastInput } from '../../src/tools/publish-podcast.js';
 
 let s3UploadCalls: { localPath: string; key: string }[] = [];
 let s3UploadErr: Error | null = null;
@@ -269,65 +269,51 @@ describe('publish_podcast handler', () => {
     });
   });
 
-  describe('timestamp validation', () => {
-    it('accepts valid RFC 3339 datetime', async () => {
-      const f = mkFile('test.mp3');
-      const handler = mkHandler({ feed: mkFeed(mockFeed), s3: { bucket: 'b', publicUrl: 'u' }, publishPublicUrl: 'https://cdn.example.com' });
-      const result = await handler({
+  describe('timestamp validation (schema-level)', () => {
+
+    it('accepts valid RFC 3339 datetime', () => {
+      const result = PublishPodcastInput.safeParse({
         outputFilename: 'test.mp3',
         episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1',
         episodePublishedAt: '2024-01-15T10:30:00.000Z',
       });
       expect(result.success).toBe(true);
-      fs.unlinkSync(f);
     });
 
-    it('rejects 2024-02-30 (invalid date)', async () => {
-      const f = mkFile('test.mp3');
-      const handler = mkHandler({ feed: mkFeed(mockFeed), s3: { bucket: 'b', publicUrl: 'u' }, publishPublicUrl: 'https://cdn.example.com' });
-      try {
-        await handler({
-          outputFilename: 'test.mp3',
-          episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1',
-          episodePublishedAt: '2024-02-30T00:00:00.000Z',
-        });
-        expect.fail('Should have rejected');
-      } catch {
-        // Zod validation should reject this
-      }
-      fs.unlinkSync(f);
+    it('rejects 2024-02-30 (invalid date)', () => {
+      const result = PublishPodcastInput.safeParse({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1',
+        episodePublishedAt: '2024-02-30T00:00:00.000Z',
+      });
+      expect(result.success).toBe(false);
     });
 
-    it('rejects T24:00:00Z (invalid hour)', async () => {
-      const f = mkFile('test.mp3');
-      const handler = mkHandler({ feed: mkFeed(mockFeed), s3: { bucket: 'b', publicUrl: 'u' }, publishPublicUrl: 'https://cdn.example.com' });
-      try {
-        await handler({
-          outputFilename: 'test.mp3',
-          episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1',
-          episodePublishedAt: '2024-01-01T24:00:00Z',
-        });
-        expect.fail('Should have rejected');
-      } catch {
-        // Zod validation should reject this
-      }
-      fs.unlinkSync(f);
+    it('rejects T24:00:00Z (invalid hour)', () => {
+      const result = PublishPodcastInput.safeParse({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1',
+        episodePublishedAt: '2024-01-01T24:00:00Z',
+      });
+      expect(result.success).toBe(false);
     });
 
-    it('rejects offset +99:99', async () => {
-      const f = mkFile('test.mp3');
-      const handler = mkHandler({ feed: mkFeed(mockFeed), s3: { bucket: 'b', publicUrl: 'u' }, publishPublicUrl: 'https://cdn.example.com' });
-      try {
-        await handler({
-          outputFilename: 'test.mp3',
-          episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1',
-          episodePublishedAt: '2024-01-01T12:00:00+99:99',
-        });
-        expect.fail('Should have rejected');
-      } catch {
-        // Zod validation should reject this
-      }
-      fs.unlinkSync(f);
+    it('rejects offset +99:99 (invalid offset hour)', () => {
+      const result = PublishPodcastInput.safeParse({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1',
+        episodePublishedAt: '2024-01-01T12:00:00+99:99',
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects second 60', () => {
+      const result = PublishPodcastInput.safeParse({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1',
+        episodePublishedAt: '2024-01-01T12:00:60Z',
+      });
+      expect(result.success).toBe(false);
     });
   });
 
@@ -362,12 +348,57 @@ describe('publish_podcast handler', () => {
       fs.unlinkSync(f);
     });
 
+    it('rejects fe80:: as loopback', async () => {
+      const f = mkFile('test.mp3');
+      const handler = mkHandler({
+        feed: mkFeed(mockFeed),
+        s3: undefined,
+        publishPublicUrl: 'http://[fe80::1]:3000',
+      });
+      const result = await handler({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
+      });
+      expect(result.success).toBe(false);
+      fs.unlinkSync(f);
+    });
+
+    it('rejects 0.0.0.0 as loopback', async () => {
+      const f = mkFile('test.mp3');
+      const handler = mkHandler({
+        feed: mkFeed(mockFeed),
+        s3: undefined,
+        publishPublicUrl: 'http://0.0.0.0:3000',
+      });
+      const result = await handler({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
+      });
+      expect(result.success).toBe(false);
+      fs.unlinkSync(f);
+    });
+
     it('rejects malformed URL', async () => {
       const f = mkFile('test.mp3');
       const handler = mkHandler({
         feed: mkFeed(mockFeed),
         s3: undefined,
         publishPublicUrl: 'not-a-url',
+      });
+      const result = await handler({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
+      });
+      expect(result.success).toBe(false);
+      fs.unlinkSync(f);
+    });
+
+    it('rejects ftp protocol', async () => {
+      const f = mkFile('test.mp3');
+      const handler = mkHandler({
+        feed: mkFeed(mockFeed),
+        s3: undefined,
+        publishPublicUrl: 'ftp://cdn.example.com',
       });
       const result = await handler({
         outputFilename: 'test.mp3',

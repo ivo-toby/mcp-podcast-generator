@@ -77,13 +77,20 @@ if (rssFeedUrl) {
       );
       process.exit(1);
     }
-    // Reject localhost/127.0.0.1/::1 as public enclosure URL
+    // Reject loopback/localhost hosts and non-HTTP(S) protocols
     try {
       const parsed = new URL(pubUrl);
-      const badHosts = ['localhost', '127.0.0.1', '::1'];
-      if (badHosts.includes(parsed.hostname)) {
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
         logger.fatal(
-          `PUBLIC_URL hostname "${parsed.hostname}" is a private address — required for RSS-only enclosure URLs. Use a public hostname.`
+          `PUBLIC_URL "${pubUrl}" uses unsupported protocol "${parsed.protocol}" — required for RSS-only enclosure URLs.`
+        );
+        process.exit(1);
+      }
+      const h = parsed.hostname.replace(/^\[/, '').replace(/\]$/, '');
+      const badHosts = ['localhost', '::1', '0.0.0.0'];
+      if (badHosts.includes(h) || /^127\./.test(h) || h.startsWith('fe80::')) {
+        logger.fatal(
+          `PUBLIC_URL hostname "${parsed.hostname}" is a private/loopback address — required for RSS-only enclosure URLs. Use a public hostname.`
         );
         process.exit(1);
       }

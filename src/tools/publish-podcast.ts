@@ -329,7 +329,7 @@ async function executePublish(
             } else {
               const h = parsed.hostname.replace(/^\[/, '').replace(/\]$/, '');
               // Detect full loopback range: localhost, 127.x.x.x, ::1, fe80::, 0.0.0.0
-              if (h === 'localhost' || h === '::1' || h === 'fe80::' || h === '0.0.0.0') {
+              if (h === 'localhost' || h === '::1' || h === '0.0.0.0' || h.startsWith('fe80::')) {
                 isInvalid = true;
               } else if (/^127\./.test(h)) {
                 isInvalid = true;

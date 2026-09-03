@@ -4,6 +4,15 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { mkdir } from 'fs/promises';
 import { generatePodcast, GeneratePodcastInput } from './tools/generate-podcast.js';
 import { logger } from './utils/logger.js';
+import { validateS3Config, type S3Config } from './storage/storage-types.js';
+import { S3StorageBackend } from './storage/s3-storage.js';
+import { RssFeedBackend } from './feed/rss-feed.js';
+import {
+  createPublishHandler,
+  PublishPodcastInput,
+  type RssConfig,
+  type S3PublishConfig,
+} from './tools/publish-podcast.js';
 
 // Configuration from environment
 const config = {
@@ -13,6 +22,104 @@ const config = {
   port: parseInt(process.env.PORT ?? '3000', 10),
   publicUrl: (process.env.PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? '3000'}`).replace(/\/$/, ''),
 };
+
+// --- S3 configuration ---
+let s3Config: S3Config | null = null;
+try {
+  const s3Result = validateS3Config();
+  s3Config = s3Result.config;
+  if (s3Result.enabled && s3Config) {
+    logger.info({ bucket: s3Config.bucket }, 'S3 storage enabled');
+  }
+} catch (err) {
+  logger.fatal({ err }, 'S3 configuration invalid — exiting');
+  process.exit(1);
+}
+
+// --- RSS / feed configuration ---
+let rssFeedBackend: RssFeedBackend | null = null;
+let rssConfig: RssConfig | null = null;
+const rssFeedUrl = process.env.RSS_FEED_URL;
+const podcastTitle = process.env.PODCAST_TITLE;
+const podcastDescription = process.env.PODCAST_DESCRIPTION;
+const podcastLink = process.env.PODCAST_LINK;
+const podcastAuthor = process.env.PODCAST_AUTHOR;
+const podcastLanguage = process.env.PODCAST_LANGUAGE ?? 'en-us';
+const podcastCategories = process.env.PODCAST_CATEGORIES
+  ? process.env.PODCAST_CATEGORIES.split(',').map((s) => s.trim()).filter(Boolean)
+  : ['Technology'];
+
+if (rssFeedUrl) {
+  // Validate required podcast metadata
+  const missing = [
+    !podcastTitle && 'PODCAST_TITLE',
+    !podcastDescription && 'PODCAST_DESCRIPTION',
+    !podcastLink && 'PODCAST_LINK',
+    !podcastAuthor && 'PODCAST_AUTHOR',
+  ].filter(Boolean);
+
+  if (missing.length > 0) {
+    logger.fatal(
+      `RSS configured (RSS_FEED_URL set) but missing required metadata: ${missing.join(', ')}`
+    );
+    process.exit(1);
+  }
+
+  // RSS-only mode (no S3) requires PUBLIC_URL
+  const hasS3 = s3Config !== null;
+  if (!hasS3) {
+    const pubUrl = config.publicUrl;
+    if (!pubUrl) {
+      logger.fatal(
+        'RSS-only mode requires PUBLIC_URL (no S3 configured and no PUBLIC_URL set)'
+      );
+      process.exit(1);
+    }
+    // Reject localhost/127.0.0.1/::1 as public enclosure URL
+    try {
+      const parsed = new URL(pubUrl);
+      const badHosts = ['localhost', '127.0.0.1', '::1'];
+      if (badHosts.includes(parsed.hostname)) {
+        logger.fatal(
+          `PUBLIC_URL hostname "${parsed.hostname}" is a private address — required for RSS-only enclosure URLs. Use a public hostname.`
+        );
+        process.exit(1);
+      }
+    } catch {
+      // Invalid URL — allow it, feed backend will catch it at runtime
+    }
+  }
+
+  rssFeedBackend = new RssFeedBackend({
+    title: podcastTitle!,
+    link: podcastLink!,
+    description: podcastDescription!,
+    author: podcastAuthor!,
+    language: podcastLanguage,
+    categories: podcastCategories,
+  });
+  rssConfig = {
+    feed: rssFeedBackend,
+    feedUrl: rssFeedUrl,
+    podcast: {
+      title: podcastTitle!,
+      link: podcastLink!,
+      description: podcastDescription!,
+      author: podcastAuthor!,
+      language: podcastLanguage,
+      categories: podcastCategories,
+    },
+    publicUrl: config.publicUrl,
+  };
+  logger.info({ feedUrl: rssFeedUrl }, 'RSS feed enabled');
+}
+
+// --- Storage backend ---
+let storageBackend: S3StorageBackend | null = null;
+if (s3Config) {
+  storageBackend = new S3StorageBackend(s3Config);
+  logger.info({ bucket: s3Config.bucket }, 'S3 storage backend created');
+}
 
 if (!config.googleApiKey) {
   logger.fatal('GOOGLE_API_KEY environment variable is required');
@@ -34,6 +141,51 @@ function createMcpServer(): McpServer {
     name: 'podcast-generator',
     version: '1.0.0',
   });
+
+  // Register publish_podcast tool
+  if (storageBackend || rssConfig) {
+    const publishHandler = createPublishHandler({
+      storage: storageBackend!,
+      feed: rssConfig ?? undefined,
+      s3: s3Config
+        ? { bucket: s3Config.bucket, publicUrl: s3Config.publicUrl }
+        : undefined,
+      outputDir: config.outputDir,
+      publishPublicUrl: config.publicUrl,
+    });
+
+    server.tool(
+      'publish_podcast',
+      'Publish a generated podcast MP3 to S3 storage and/or update the RSS feed. Validates the output file (size, symlinks, traversal), probes duration with ffprobe, uploads to S3 if configured, and/or appends an episode entry to the RSS feed. Returns structured publish results with per-stage status.',
+      PublishPodcastInput.shape,
+      async (input) => {
+        try {
+          const validated = PublishPodcastInput.parse(input);
+          const result = await publishHandler(validated);
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+          };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          logger.error({ err }, '[publish_podcast] Tool error');
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: message }, null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    );
+  }
 
   server.tool(
     'generate_podcast',

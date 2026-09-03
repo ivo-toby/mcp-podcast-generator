@@ -12,6 +12,13 @@ import type {
 import type { StorageBackend } from '../storage/storage-types.js';
 import { logger } from '../utils/logger.js';
 
+/** RFC 3339 / ISO 8601 datetime pattern. */
+const RFC3339_REGEX =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+/** Characters that are dangerous in shell contexts. */
+const SHELL_CHARS = /[;|&$`\\"'<>(){}!#\n\r]/;
+
 /** Input schema for the `publish_podcast` tool. */
 export const PublishPodcastInput = z.object({
   outputFilename: z.string(),
@@ -20,7 +27,7 @@ export const PublishPodcastInput = z.object({
   episodeNumber: z.number().int().positive().optional(),
   episodeSeason: z.number().int().positive().optional(),
   episodeGuid: z.string().optional(),
-  episodePublishedAt: z.string().optional(),
+  episodePublishedAt: z.string().regex(RFC3339_REGEX, { message: 'must be RFC 3339' }).optional(),
 });
 
 export type PublishPodcastInput = z.infer<typeof PublishPodcastInput>;
@@ -106,10 +113,20 @@ async function executePublish(
     return buildResult({
       s3: skipResult('no_storage_configured'),
       rss: skipResult('no_feed_configured'),
+      errorCode: 'no_storage_or_feed_configured',
     });
   }
 
   // Validate filename
+  // Reject path traversal / shell metacharacters early (before realpath)
+  if (SHELL_CHARS.test(input.outputFilename)) {
+    return buildResult({
+      s3: skipResult('validation_failed'),
+      rss: skipResult('validation_failed'),
+      errorCode: 'invalid_output_filename',
+    });
+  }
+
   const validationError = validateFilename(input.outputFilename);
   if (validationError) {
     return buildResult({
@@ -197,6 +214,14 @@ async function executePublish(
   if (opts.hasStorage) {
     try {
       mediaAsset = await opts.storage.upload(filename, candidatePath);
+      // Override the URL with publishPublicUrl-based URL (spec requirement).
+      const normalizedPublicUrl = opts.publishPublicUrl?.replace(/\/+$/, '') ?? '';
+      if (normalizedPublicUrl) {
+        mediaAsset = {
+          ...mediaAsset,
+          url: `${normalizedPublicUrl}/episodes/${encodeURIComponent(filename)}`,
+        };
+      }
       s3Result = { status: 'succeeded', s3Url: mediaAsset.url };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -289,23 +314,24 @@ function buildResult(opts: {
   const { s3, rss, errorCode, fileSizeBytes, durationSeconds, probeStatFailed, probeFFprobeFailed } = opts;
   const success = s3.status === 'succeeded' || rss.status === 'succeeded';
 
-  // Determine errorCode precedence
+  // Determine errorCode precedence per spec:
+  //   probe error takes precedence over stage errors when no stage succeeded
+  //   otherwise first-failure stage error
   let finalErrorCode = errorCode;
   if (!finalErrorCode && !success) {
-    // First failure stage error
-    if (s3.status === 'failed') {
-      finalErrorCode = (s3 as { errorCode?: string }).errorCode;
-    } else if (rss.status === 'failed') {
-      finalErrorCode = (rss as { errorCode?: string }).errorCode;
+    // Probe errors take precedence over stage failures
+    if (probeFFprobeFailed) {
+      finalErrorCode = 'probe_ffprobe_failed';
+    } else if (probeStatFailed) {
+      finalErrorCode = 'probe_stat_failed';
+    } else {
+      // No probe errors — first failure stage
+      if (s3.status === 'failed') {
+        finalErrorCode = (s3 as { errorCode?: string }).errorCode;
+      } else if (rss.status === 'failed') {
+        finalErrorCode = (rss as { errorCode?: string }).errorCode;
+      }
     }
-  }
-  // Probe errors take precedence when no stage succeeded
-  if (!success && finalErrorCode) {
-    // errorCode already set
-  } else if (!success && probeFFprobeFailed) {
-    finalErrorCode = 'probe_ffprobe_failed';
-  } else if (!success && probeStatFailed) {
-    finalErrorCode = 'probe_stat_failed';
   }
 
   return {

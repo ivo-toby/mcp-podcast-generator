@@ -162,7 +162,7 @@ Claude will call the tool and return the output path when done.
 | `OUTPUT_DIR` | | `/output` | Directory where MP3 files are written |
 | `TEMP_DIR` | | `/tmp/podcast-gen` | Temporary processing directory |
 | `PORT` | | `3000` | HTTP server port |
-| `PUBLIC_URL` | | `http://localhost:3000` | Base URL used to construct download links. For RSS-only mode this **must** be a public HTTP(S) hostname — localhost, 127.0.0.0/8, ::1, fe80::/10, and 0.0.0.0 are rejected. |
+| `PUBLIC_URL` | | `http://localhost:3000` | Base URL used to construct download links. For RSS-only mode this **must** be a public HTTP(S) hostname — localhost, 127.0.0.0/8, ::1, fe80::*, and 0.0.0.0 are rejected. |
 | `S3_ENDPOINT` | | — | S3-compatible endpoint URL (e.g. `https://s3.amazonaws.com`). All 5 S3 vars must be set together. |
 | `S3_REGION` | | `us-east-1` | AWS region |
 | `S3_ACCESS_KEY_ID` | | — | S3 access key |

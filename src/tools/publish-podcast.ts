@@ -15,28 +15,41 @@ import { logger } from '../utils/logger.js';
 /** RFC 3339 / ISO 8601 datetime pattern. */
 /** Validates a string is a strict RFC 3339 datetime.
  * Rejects values that JavaScript silently normalizes (e.g. 2024-02-30 → 2024-03-01,
- * 2024-01-01T24:00:00Z). Validates date AND time components explicitly.
+ * 2024-01-01T24:00:00Z). Validates date, time, AND offset components.
  */
 function isValidRFC3339(raw: string): boolean {
   if (!RFC3339_REGEX.test(raw)) return false;
-  // Validate date components (reject JS normalization of invalid dates)
-  const dateParts = raw.split('T')[0].split('-');
+  // Validate date components
+  const dateStr = raw.split('T')[0];
+  const dateParts = dateStr.split('-');
   const year = Number(dateParts[0]);
   const month = Number(dateParts[1]);
   const day = Number(dateParts[2]);
+  if (isNaN(year) || isNaN(month) || isNaN(day)) return false;
   const rebuilt = new Date(year, month - 1, day);
   if (rebuilt.getFullYear() !== year || rebuilt.getMonth() !== month - 1 || rebuilt.getDate() !== day) {
     return false;
   }
-  // Validate time components — reject values like T24:00:00
-  const timeStr = raw.split('T')[1].split(/[Z+]/)[0];
-  const timeParts = timeStr.split(':');
+  // Validate time and offset components
+  const timeOffset = raw.split('T')[1]; // e.g. "12:34:56.000Z" or "12:34:56+05:00"
+  // Extract time part (before Z or + or -)
+  const timePart = timeOffset.split(/[Z+-]/)[0];
+  const timeParts = timePart.split(':');
   const hour = Number(timeParts[0]);
   const minute = Number(timeParts[1]);
-  const second = Number(timeParts[2]);
+  const secondStr = timeParts[2] ?? '0';
+  const second = Number(secondStr);
+  if (isNaN(hour) || isNaN(minute) || isNaN(second)) return false;
   if (hour < 0 || hour > 23) return false;
   if (minute < 0 || minute > 59) return false;
   if (second < 0 || second > 59) return false;
+  // Validate offset if present: must be +/-HH:MM with valid ranges
+  const offsetMatch = timeOffset.match(/([+-])(\d{2}):(\d{2})$/);
+  if (offsetMatch) {
+    const offHour = Number(offsetMatch[2]);
+    const offMin = Number(offsetMatch[3]);
+    if (offHour > 23 || offMin > 59) return false;
+  }
   return true;
 }
 

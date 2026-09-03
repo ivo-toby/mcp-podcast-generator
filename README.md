@@ -164,7 +164,7 @@ Claude will call the tool and return the output path when done.
 | `PORT` | | `3000` | HTTP server port |
 | `PUBLIC_URL` | | `http://localhost:3000` | Base URL used to construct download links. For RSS-only mode this **must** be a public hostname (not localhost/127.0.0.1/[::1]). |
 | `S3_ENDPOINT` | | — | S3-compatible endpoint URL (e.g. `https://s3.amazonaws.com`). All 5 S3 vars must be set together. |
-| `S3_REGION` | | `us-east1` | AWS region |
+| `S3_REGION` | | `us-east-1` | AWS region |
 | `S3_ACCESS_KEY_ID` | | — | S3 access key |
 | `S3_SECRET_ACCESS_KEY` | | — | S3 secret key |
 | `S3_BUCKET` | | — | S3 bucket name |

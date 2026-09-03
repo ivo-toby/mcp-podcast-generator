@@ -30,6 +30,9 @@ export class S3StorageBackend {
         secretAccessKey: config.secretAccessKey,
       },
       forcePathStyle: config.forcePathStyle,
+      requestHandler: new NodeHttpHandler({
+        requestTimeout: 300_000, // 5 minutes — prevents indefinite hangs on slow connections
+      }),
     });
   }
 

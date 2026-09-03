@@ -13,13 +13,24 @@ import type { StorageBackend } from '../storage/storage-types.js';
 import { logger } from '../utils/logger.js';
 
 /** RFC 3339 / ISO 8601 datetime pattern. */
-/** Validates a string looks like a real RFC 3339 datetime. */
+/** Validates a string is a strict RFC 3339 datetime.
+ * Rejects values that JavaScript silently normalizes (e.g. 2024-02-30 → 2024-03-01).
+ */
 function isValidRFC3339(raw: string): boolean {
-  // Must match the regex shape first
   if (!RFC3339_REGEX.test(raw)) return false;
-  // Parse and verify the date is real (rejects 2024-99-99 etc.)
   const d = new Date(raw);
-  return !isNaN(d.getTime());
+  if (isNaN(d.getTime())) return false;
+  // Reject values where JS silently overflows month/day
+  const parts = raw.split('T')[0].split('-');
+  const year = Number(parts[0]);
+  const month = Number(parts[1]);
+  const day = Number(parts[2]);
+  // Rebuild the date — if JS normalizes it, the components won't match
+  const rebuilt = new Date(year, month - 1, day);
+  if (rebuilt.getFullYear() !== year || rebuilt.getMonth() !== month - 1 || rebuilt.getDate() !== day) {
+    return false;
+  }
+  return true;
 }
 
 const RFC3339_REGEX =
@@ -206,16 +217,21 @@ async function executePublish(
   }
 
   // Separate fs.stat probe on the resolved path (per plan spec)
+  // Use the canonical stat result for file size (not lstat).
   let probeStatFailed = false;
-  let probeStatResult: { size: number } | undefined;
+  let fileSizeBytes: number;
   try {
     const statOnResolved = fs.statSync(resolvedPath);
-    probeStatResult = { size: statOnResolved.size };
+    fileSizeBytes = statOnResolved.size;
   } catch {
     probeStatFailed = true;
+    // Reject before unbounded readFile — we don't know the real file size
+    return buildResult({
+      s3: skipResult('stat_failed'),
+      rss: skipResult('stat_failed'),
+      errorCode: 'probe_stat_failed',
+    });
   }
-
-  const fileSizeBytes = statResult.size;
 
   // Size check
   if (fileSizeBytes > 500 * 1024 * 1024) {
@@ -426,7 +442,12 @@ function probeDuration(filePath: string): Promise<number> {
           reject(new Error('ffprobe: no duration in output'));
           return;
         }
-        resolve(Number(dur));
+        const num = Number(dur);
+        if (!Number.isFinite(num) || num < 0) {
+          reject(new Error('ffprobe: invalid duration value'));
+          return;
+        }
+        resolve(num);
       } catch {
         reject(new Error('ffprobe: failed to parse output'));
       }

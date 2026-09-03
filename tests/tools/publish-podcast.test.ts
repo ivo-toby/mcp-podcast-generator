@@ -318,6 +318,42 @@ describe('publish_podcast handler', () => {
       });
       expect(result.success).toBe(false);
     });
+
+    it('accepts 0000-02-29 (year 0 is a leap year: divisible by 400)', () => {
+      const result = PublishPodcastInput.safeParse({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1',
+        episodePublishedAt: '0000-02-29T00:00:00Z',
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('accepts 0000-01-01', () => {
+      const result = PublishPodcastInput.safeParse({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1',
+        episodePublishedAt: '0000-01-01T00:00:00Z',
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('rejects 0099-02-29 (year 99 is not a leap year)', () => {
+      const result = PublishPodcastInput.safeParse({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1',
+        episodePublishedAt: '0099-02-29T00:00:00Z',
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects 0000-04-31 (April has 30 days)', () => {
+      const result = PublishPodcastInput.safeParse({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1',
+        episodePublishedAt: '0000-04-31T00:00:00Z',
+      });
+      expect(result.success).toBe(false);
+    });
   });
 
   describe('loopback host rejection', () => {

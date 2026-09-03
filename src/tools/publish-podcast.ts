@@ -19,9 +19,8 @@ import { logger } from '../utils/logger.js';
  */
 function isValidRFC3339(raw: string): boolean {
   if (!RFC3339_REGEX.test(raw)) return false;
-  // Validate date components — avoid Date.UTC year-wrap (0-99 → 1900-1999).
-  // Validate month and day ranges using Date for correct leap-year handling,
-  // but validate the year independently using setUTCFullYear.
+  // Validate date components using arithmetic leap-year rules to avoid
+  // JavaScript's Date.UTC year-wrap (0-99 → 1900-1999).
   const dateStr = raw.split('T')[0];
   const dateParts = dateStr.split('-');
   const year = Number(dateParts[0]);
@@ -29,14 +28,11 @@ function isValidRFC3339(raw: string): boolean {
   const day = Number(dateParts[2]);
   if (isNaN(year) || isNaN(month) || isNaN(day)) return false;
   if (month < 1 || month > 12) return false;
-  // Build date at the last valid day of the month to test day bounds
-  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate(); // JS: month 12 = Jan next year; month N = last day of month N-1; to get last day of month N: Date.UTC(year, N, 0)
-  // Actually: Date.UTC(year, month, 0) gives last day of the PREVIOUS month.
-  // To get last day of current month: Date.UTC(year, month, 0) works when month is 1-based? No.
-  // Correct: new Date(Date.UTC(year, month, 0)) gives last day of (month-1)th month.
-  // So to get last day of month: use Date.UTC(year, month, 0) where month is the current month value.
-  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-  if (day < 1 || day > daysInMonth) return false;
+  // Arithmetic days-in-month (handles leap years for any year, including year 0).
+  const daysInMonth: number[] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const isLeap = (year % 4 === 0 && year % 100 !== 0) || (year % 400 === 0);
+  daysInMonth[1] = isLeap ? 29 : 28;
+  if (day < 1 || day > daysInMonth[month - 1]) return false;
   // Validate time and offset components
   const timeOffset = raw.split('T')[1]; // e.g. "12:34:56.000Z" or "12:34:56+05:00"
   // Extract time part (before Z or + or -)

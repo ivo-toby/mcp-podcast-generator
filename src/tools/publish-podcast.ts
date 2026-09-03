@@ -13,6 +13,15 @@ import type { StorageBackend } from '../storage/storage-types.js';
 import { logger } from '../utils/logger.js';
 
 /** RFC 3339 / ISO 8601 datetime pattern. */
+/** Validates a string looks like a real RFC 3339 datetime. */
+function isValidRFC3339(raw: string): boolean {
+  // Must match the regex shape first
+  if (!RFC3339_REGEX.test(raw)) return false;
+  // Parse and verify the date is real (rejects 2024-99-99 etc.)
+  const d = new Date(raw);
+  return !isNaN(d.getTime());
+}
+
 const RFC3339_REGEX =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
@@ -27,7 +36,7 @@ export const PublishPodcastInput = z.object({
   episodeNumber: z.number().int().positive().optional(),
   episodeSeason: z.number().int().positive().optional(),
   episodeGuid: z.string().optional(),
-  episodePublishedAt: z.string().regex(RFC3339_REGEX, { message: 'must be RFC 3339' }).optional(),
+  episodePublishedAt: z.string().refine(isValidRFC3339, { message: 'must be a valid RFC 3339 datetime' }).optional(),
 });
 
 export type PublishPodcastInput = z.infer<typeof PublishPodcastInput>;
@@ -111,8 +120,8 @@ async function executePublish(
   // Short-circuit if no storage or feed configured
   if (!opts.hasStorage && !opts.hasFeed) {
     return buildResult({
-      s3: skipResult('no_storage_configured'),
-      rss: skipResult('no_feed_configured'),
+      s3: skipResult('S3 not configured'),
+      rss: skipResult('RSS not configured'),
       errorCode: 'no_storage_or_feed_configured',
     });
   }
@@ -167,7 +176,7 @@ async function executePublish(
     });
   }
 
-  // Stat + symlink check on the candidate path
+  // Symlink + type check on the candidate path
   let statResult: fs.Stats;
   try {
     const lstatResult = fs.lstatSync(candidatePath);
@@ -185,6 +194,8 @@ async function executePublish(
         errorCode: 'file_not_found',
       });
     }
+    // lstat is fine for symlinks, but for the probe stat we use fs.stat
+    // on the resolved path to get the canonical file stats.
     statResult = lstatResult;
   } catch {
     return buildResult({
@@ -192,6 +203,16 @@ async function executePublish(
       rss: skipResult('file_not_found'),
       errorCode: 'file_not_found',
     });
+  }
+
+  // Separate fs.stat probe on the resolved path (per plan spec)
+  let probeStatFailed = false;
+  let probeStatResult: { size: number } | undefined;
+  try {
+    const statOnResolved = fs.statSync(resolvedPath);
+    probeStatResult = { size: statOnResolved.size };
+  } catch {
+    probeStatFailed = true;
   }
 
   const fileSizeBytes = statResult.size;
@@ -214,8 +235,7 @@ async function executePublish(
     probeFFprobeFailed = true;
   }
 
-  // Stat is always available at this point
-  const probeStatFailed = false;
+  // probeStatFailed is already set above from the fs.stat call
 
   // Construct episode metadata
   const episode: {
@@ -237,7 +257,7 @@ async function executePublish(
   if (durationSeconds !== undefined) episode.durationSeconds = durationSeconds;
 
   // S3 upload
-  let s3Result: StageResult = skipResult('not_configured');
+  let s3Result: StageResult = skipResult('not configured');
   let mediaAsset: { url: string; lengthBytes: number; mimeType: string } | undefined;
   if (opts.hasStorage) {
     try {
@@ -252,7 +272,7 @@ async function executePublish(
   }
 
   // RSS update
-  let rssResult: StageResult = skipResult('not_configured');
+  let rssResult: StageResult = skipResult('not configured');
   if (opts.hasFeed) {
     // Only attempt RSS if we have a valid MediaAsset
     if (!mediaAsset) {

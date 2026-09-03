@@ -21,6 +21,8 @@ const config = {
   tempDir: process.env.TEMP_DIR ?? '/tmp/podcast-gen',
   port: parseInt(process.env.PORT ?? '3000', 10),
   publicUrl: (process.env.PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? '3000'}`).replace(/\/$/, ''),
+  // Raw PUBLIC_URL (no localhost default) — used by publish_podcast RSS fallback
+  rawPublicUrl: process.env.PUBLIC_URL,
 };
 
 // --- S3 configuration ---
@@ -151,7 +153,9 @@ function createMcpServer(): McpServer {
         ? { bucket: s3Config.bucket, publicUrl: s3Config.publicUrl }
         : undefined,
       outputDir: config.outputDir,
-      publishPublicUrl: config.publicUrl,
+      // Pass raw PUBLIC_URL (no localhost default) so RSS fallback
+      // never produces localhost enclosure URLs.
+      publishPublicUrl: config.rawPublicUrl,
     });
 
     server.tool(

@@ -162,7 +162,87 @@ Claude will call the tool and return the output path when done.
 | `OUTPUT_DIR` | | `/output` | Directory where MP3 files are written |
 | `TEMP_DIR` | | `/tmp/podcast-gen` | Temporary processing directory |
 | `PORT` | | `3000` | HTTP server port |
-| `PUBLIC_URL` | | `http://localhost:3000` | Base URL used to construct download links returned by the tool. Set this to your public hostname when running behind a reverse proxy or on a remote server. |
+| `PUBLIC_URL` | | `http://localhost:3000` | Base URL used to construct download links. For RSS-only mode this **must** be a public hostname (not localhost/127.0.0.1/[::1]). |
+| `S3_ENDPOINT` | | — | S3-compatible endpoint URL (e.g. `https://s3.amazonaws.com`). All 5 S3 vars must be set together. |
+| `S3_REGION` | | `us-east1` | AWS region |
+| `S3_ACCESS_KEY_ID` | | — | S3 access key |
+| `S3_SECRET_ACCESS_KEY` | | — | S3 secret key |
+| `S3_BUCKET` | | — | S3 bucket name |
+| `S3_PUBLIC_URL` | | — | Public CDN URL for uploaded files |
+| `S3_FORCE_PATH_STYLE` | | `false` | Force path-style S3 URLs (required for some MinIO deployments) |
+| `RSS_FEED_URL` | | — | RSS feed URL to update |
+| `PODCAST_TITLE` | | — | Podcast title |
+| `PODCAST_DESCRIPTION` | | — | Podcast description |
+| `PODCAST_LINK` | | — | Podcast website |
+| `PODCAST_AUTHOR` | | — | Podcast author |
+| `PODCAST_LANGUAGE` | | `en-us` | Podcast language |
+| `PODCAST_CATEGORIES` | | `Technology` | Comma-separated categories |
+
+## Architecture
+
+This server supports two optional backends:
+
+- **S3-compatible storage** — uploads generated MP3s to an S3 bucket or MinIO instance. Uses a `Buffer` (not streams) to avoid AWS SDK v3 retry hangs ([#5479](https://github.com/aws/aws-sdk-js-v3/issues/5479)).
+- **RSS feed backend** — maintains an RSS 2.0 feed with iTunes podcast extensions. Uses `xml2js` for XML parsing/building. Supports concurrent PUT with ETag/If-Match retry (412 → re-fetch → re-merge → PUT).
+
+Both backends are abstracted behind `StorageBackend` and `FeedBackend` interfaces so future providers can be added without changing the publish handler.
+
+## Dependencies
+
+| Package | Purpose |
+|---|---|
+| `@aws-sdk/client-s3` | S3-compatible storage client |
+| `xml2js` | RSS feed XML parsing and building |
+| `@types/xml2js` | TypeScript types for xml2js |
+
+## Tool: `publish_podcast`
+
+Publish a generated podcast MP3 to S3 storage and/or update the RSS feed.
+
+### Input
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `outputFilename` | string | ✅ | MP3 filename (must be `.mp3`) |
+| `episodeTitle` | string | ✅ | Episode title (1–250 chars) |
+| `episodeDescription` | string | ✅ | Episode description (1–5000 chars) |
+| `episodeGuid` | string | | Unique identifier; defaults to filename |
+| `episodePublishedAt` | string | | RFC 3339 datetime; defaults to now |
+| `episodeNumber` | number | | Episode number |
+| `episodeSeason` | number | | Season number |
+
+### Output
+
+```typescript
+{
+  success: boolean;
+  stages: {
+    s3: { status: 'succeeded' | 'failed' | 'skipped'; errorCode?: string; s3Url?: string };
+    rss: { status: 'succeeded' | 'failed' | 'skipped'; errorCode?: string; feedUrl?: string };
+  };
+  fileSizeBytes?: number;
+  durationSeconds?: number;
+  errorCode?: string;
+  probeStatFailed?: boolean;
+  probeFFprobeFailed?: boolean;
+}
+```
+
+### Concurrency model
+
+RSS PUT uses ETag-based concurrency control:
+- `412 Precondition Failed` → re-fetch feed, re-merge episode, PUT with new `If-Match`
+- `409 Conflict` → re-fetch (GET). If 200 → update mode; if 404 → create mode with `If-None-Match: *`
+- Max 3 PUT attempts before failing
+
+### Limitations
+
+- **RSS authentication** — Basic auth / API keys for feed URLs are not supported. Feed URLs must be publicly accessible.
+- **S3 public-read** — The bucket (or CDN) must allow public read for enclosure URLs to work.
+- **ETag precision** — If the feed server returns imprecise or missing ETags, concurrency falls back to last-write-wins.
+- **RSS-only** — When S3 is not configured, `PUBLIC_URL` is required and cannot be localhost/127.0.0.1/[::1].
+- **File size** — Files over 500 MB are rejected. The entire file is read into a Buffer for upload (to avoid stream retry issues).
+- **No streaming** — Large files are buffered in memory. For very large files consider increasing heap (`--max-old-space-size`).
 
 ## MCP Endpoint
 

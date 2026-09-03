@@ -1,3 +1,4 @@
+import type { MediaAsset } from '../storage/storage-types.js';
 /**
  * Feed types and publish result structures.
  */
@@ -104,6 +105,6 @@ export interface FeedBackend {
   addEpisode(
     feedUrl: string,
     episode: EpisodeMetadata,
-    media: { url: string; lengthBytes: number; mimeType: string }
+    media: MediaAsset
   ): Promise<FeedResult>;
 }

@@ -2,6 +2,7 @@ import {
   S3Client,
   PutObjectCommand,
 } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@aws-sdk/node-http-handler';
 import { readFile } from 'fs/promises';
 import type { S3Config, MediaAsset } from './storage-types.js';
 import { childLogger } from '../utils/logger.js';
@@ -43,10 +44,10 @@ export class S3StorageBackend {
     const buffer = await readFile(localPath);
     const contentType = 'audio/mpeg';
 
-    // Extract filename from key for the public URL (key = `episodes/${filename}`)
-    const filename = key.split('/').pop() || key;
-    const encodedFilename = encodeURIComponent(filename);
-    const url = `${this.config.publicUrl}/episodes/${encodedFilename}`;
+    // Encode every key segment for the public URL.
+    // The key (e.g. `episodes/episode.mp3`) maps directly to the URL path.
+    const encodedSegments = key.split('/').map(encodeURIComponent);
+    const url = `${this.config.publicUrl}/${encodedSegments.join('/')}`;
 
     await this.client.send(
       new PutObjectCommand({

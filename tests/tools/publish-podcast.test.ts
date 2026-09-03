@@ -124,7 +124,7 @@ describe('publish_podcast handler', () => {
       expect(result.success).toBe(true);
       const s = (result as Record<string, unknown>).stages as Record<string, unknown>;
       expect(s.rss.status).toBe('skipped');
-      expect((s.rss as Record<string, unknown>).reason).toBe('not_configured');
+      expect((s.rss as Record<string, unknown>).reason).toBe('not configured');
       fs.unlinkSync(f);
     });
   });

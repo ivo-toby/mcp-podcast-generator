@@ -139,7 +139,35 @@ async function executePublish(
   const filename = path.basename(input.outputFilename);
   const candidatePath = path.join(opts.outputDir, filename);
 
-  // Stat + symlink check
+  // realpath containment check — reject if resolved path is outside outputDir
+  let resolvedPath: string;
+  try {
+    resolvedPath = fs.realpathSync(candidatePath);
+  } catch {
+    return buildResult({
+      s3: skipResult('file_not_found'),
+      rss: skipResult('file_not_found'),
+      errorCode: 'file_not_found',
+    });
+  }
+
+  let resolvedOutputDir: string;
+  try {
+    resolvedOutputDir = fs.realpathSync(opts.outputDir);
+  } catch {
+    resolvedOutputDir = path.resolve(opts.outputDir);
+  }
+
+  const relative = path.relative(resolvedOutputDir, resolvedPath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return buildResult({
+      s3: skipResult('path_traversal_attempted'),
+      rss: skipResult('path_traversal_attempted'),
+      errorCode: 'path_traversal_attempted',
+    });
+  }
+
+  // Stat + symlink check on the candidate path
   let statResult: fs.Stats;
   try {
     const lstatResult = fs.lstatSync(candidatePath);
@@ -215,14 +243,6 @@ async function executePublish(
     try {
       const s3Key = `episodes/${filename}`;
       mediaAsset = await opts.storage.upload(candidatePath, s3Key);
-      // Override the URL with publishPublicUrl-based URL (spec requirement).
-      const normalizedPublicUrl = opts.publishPublicUrl?.replace(/\/+$/, '') ?? '';
-      if (normalizedPublicUrl) {
-        mediaAsset = {
-          ...mediaAsset,
-          url: `${normalizedPublicUrl}/episodes/${encodeURIComponent(filename)}`,
-        };
-      }
       s3Result = { status: 'succeeded', s3Url: mediaAsset.url };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -239,13 +259,17 @@ async function executePublish(
       if (opts.publishPublicUrl) {
         // RSS-only fallback: construct URL from publishPublicUrl
         const normalizedUrl = opts.publishPublicUrl.replace(/\/+$/, '');
-        const encodedFilename = encodeURIComponent(filename);
-        const rssMediaAsset = {
-          url: `${normalizedUrl}/output/${encodedFilename}`,
-          lengthBytes: fileSizeBytes,
-          mimeType: 'audio/mpeg',
-        };
-        mediaAsset = rssMediaAsset;
+        if (!normalizedUrl) {
+          rssResult = { status: 'failed', errorCode: 'rss_missing_media_url', errorMessage: 'publishPublicUrl is empty or only slashes' };
+        } else {
+          const encodedFilename = encodeURIComponent(filename);
+          const rssMediaAsset = {
+            url: `${normalizedUrl}/output/${encodedFilename}`,
+            lengthBytes: fileSizeBytes,
+            mimeType: 'audio/mpeg',
+          };
+          mediaAsset = rssMediaAsset;
+        }
       } else {
         // No S3 and no publishPublicUrl — RSS has no valid MediaAsset
         rssResult = { status: 'failed', errorCode: 'rss_missing_media_url', errorMessage: 'No S3 URL and publishPublicUrl not configured' };

@@ -24,14 +24,13 @@ const BUILDER_OPTS = {
 };
 
 /**
- * Shared xml2js parser options — XXE protection.
+ * Shared xml2js parser options.
+ *
+ * feed URLs are operator-configured (not user-supplied), so XXE risk is low.
+ * xml2js 0.6 ignores whitelist/maxDepth — we validate input size instead.
  */
-// xml2js does not support XXE protection options natively;
-// feed URLs are operator-configured (not user-supplied), so risk is low.
-const PARSER_OPTS: Record<string, unknown> = {
-  whitelist: [],
-  maxDepth: 100,
-};
+const PARSER_OPTS: import('xml2js').ParserOptions = {};
+const MAX_FEED_XML_SIZE = 2 * 1024 * 1024; // 2 MB
 
 /**
  * RSS feed backend using xml2js for parsing and building XML.
@@ -72,7 +71,11 @@ export class RssFeedBackend implements FeedBackend {
     if (fetchRes.status === 200) {
       let existingXml: string;
       try {
-        existingXml = await fetchRes.text();
+        const body = await fetchRes.text();
+        if (new TextEncoder().encode(body).length > MAX_FEED_XML_SIZE) {
+          throw new FeedError('rss_fetch_failed', 'feed exceeds maximum size');
+        }
+        existingXml = body;
       } catch (err) {
         throw new FeedError('rss_fetch_failed', `body read error: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -306,7 +309,11 @@ export class RssFeedBackend implements FeedBackend {
         if (getRes.status === 200) {
           let existingXml: string;
           try {
-            existingXml = await getRes.text();
+            const body = await getRes.text();
+            if (new TextEncoder().encode(body).length > MAX_FEED_XML_SIZE) {
+              throw new FeedError('rss_fetch_failed', 'feed exceeds maximum size');
+            }
+            existingXml = body;
           } catch (err) {
             throw new FeedError('rss_fetch_failed', `body read error: ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -315,6 +322,8 @@ export class RssFeedBackend implements FeedBackend {
           try {
             mergedXml = await this.updateFeed(existingXml, _episode, _media);
           } catch (err) {
+            // Preserve FeedError codes (e.g., rss_duplicate_guid) rather than masking them.
+            if (err instanceof FeedError) throw err;
             throw new FeedError('rss_update_failed', `merge error: ${err instanceof Error ? err.message : String(err)}`);
           }
           currentXml = mergedXml;
@@ -409,11 +418,9 @@ function truncateAtWord(text: string, maxLength: number, includeEllipsis?: boole
 
   const ellipsis = includeEllipsis ? '...' : '';
   let truncated = text.slice(0, maxLength - ellipsis.length);
-  const lastWs = truncated.search(/\s$/);
+  const lastWs = truncated.search(/\s+$/);
   if (lastWs > 0) {
     truncated = truncated.slice(0, lastWs);
-  } else if (lastWs === 0) {
-    truncated = '';
   }
   return truncated + ellipsis;
 }

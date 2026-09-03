@@ -162,14 +162,16 @@ Claude will call the tool and return the output path when done.
 | `OUTPUT_DIR` | | `/output` | Directory where MP3 files are written |
 | `TEMP_DIR` | | `/tmp/podcast-gen` | Temporary processing directory |
 | `PORT` | | `3000` | HTTP server port |
-| `PUBLIC_URL` | | `http://localhost:3000` | Base URL used to construct download links. For RSS-only mode this **must** be a public HTTP(S) hostname — localhost, 127.0.0.0/8, ::1, fe80::*, and 0.0.0.0 are rejected. |
+| `PUBLIC_URL` | | `http://localhost:3000` | Base URL for download links. For RSS-only mode this **must** be a public HTTP(S) hostname — localhost, 127.0.0.0/8, ::1, fe80::*, and 0.0.0.0 are rejected. |
 | `S3_ENDPOINT` | | — | S3-compatible endpoint URL (e.g. `https://s3.amazonaws.com`). All 5 S3 vars must be set together. |
-| `S3_REGION` | | `us-east-1` | AWS region |
+| `S3_REGION` | | `us-east-1` | AWS region. For Cloudflare R2, set to `auto` — R2 is regionless. |
 | `S3_ACCESS_KEY_ID` | | — | S3 access key |
 | `S3_SECRET_ACCESS_KEY` | | — | S3 secret key |
 | `S3_BUCKET` | | — | S3 bucket name |
 | `S3_PUBLIC_URL` | | — | Public CDN URL for uploaded files |
-| `S3_FORCE_PATH_STYLE` | | `false` | Force path-style S3 URLs (required for some MinIO deployments) |
+| `S3_FORCE_PATH_STYLE` | | `false` | Force path-style URLs. Set to `true` for Cloudflare R2 and MinIO. |
+**Cloudflare R2 note:** Replace `<account-id>` in your endpoint with your Cloudflare account ID (found in the dashboard URL). Create an R2 API token with "R2 Objects Read & Write" scope. Set `S3_FORCE_PATH_STYLE=true` — required for R2 since it uses path-style URLs.
+
 | `RSS_FEED_URL` | | — | RSS feed URL to update |
 | `PODCAST_TITLE` | | — | Podcast title |
 | `PODCAST_DESCRIPTION` | | — | Podcast description |

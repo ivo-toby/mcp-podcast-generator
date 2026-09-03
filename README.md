@@ -342,6 +342,44 @@ EBU R128 Normalization (two-pass, target: -16 LUFS)
      /output/episode.mp3
 ```
 
+## S3 Upload & RSS Publishing
+
+Optionally configure S3 storage and RSS feed publishing by setting environment variables.
+
+### S3 Storage
+
+Upload generated MP3s to an S3-compatible bucket:
+
+```bash
+export S3_ENDPOINT=https://s3.amazonaws.com
+export S3_ACCESS_KEY_ID=...
+export S3_SECRET_ACCESS_KEY=...
+export S3_BUCKET=my-podcasts
+export S3_PUBLIC_URL=https://cdn.example.com
+```
+
+All five variables must be set together — omit all to disable.
+
+### RSS Feed
+
+Maintain an RSS 2.0 feed that the `publish_podcast` tool updates on each call:
+
+```bash
+export RSS_FEED_URL=https://cdn.example.com/podcast.xml
+export PODCAST_TITLE=My Podcast
+export PODCAST_DESCRIPTION=A podcast about engineering
+export PODCAST_LINK=https://example.com
+export PODCAST_AUTHOR=Jane Doe
+```
+
+Omit all to disable RSS. `PODCAST_LANGUAGE` defaults to `en-us`; `PODCAST_CATEGORIES` defaults to `Technology`.
+
+**RSS-only mode** (S3 not configured): `PUBLIC_URL` must be set and cannot resolve to `localhost`, `127.0.0.1`, or `::1`.
+
+### Publish Tool
+
+The `publish_podcast` MCP tool reads an existing MP3, uploads it to S3 (if configured), and appends an episode entry to the RSS feed (if configured). It validates the output file, probes duration with `ffprobe`, and returns structured per-stage results.
+
 ## Using with an MCP Client
 
 Add to your MCP client configuration:

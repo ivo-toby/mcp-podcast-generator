@@ -78,6 +78,9 @@ describe('publish_podcast handler', () => {
 
   beforeEach(() => {
     resetMocks();
+    // Clean up stale test artifacts from prior runs (e.g., stat test creating /tmp/test.mp3 as dir)
+    try { fs.rmSync('/tmp/test.mp3', { force: true, recursive: true }); } catch {}
+    try { fs.rmSync('/tmp/test_stat_fail.mp3', { force: true, recursive: true }); } catch {}
   });
 
   afterEach(() => {
@@ -318,8 +321,38 @@ describe('publish_podcast handler', () => {
   });
 
   describe('loopback host rejection', () => {
+    it('rejects ::1 as loopback', async () => {
+      const f = mkFile('test_loopback_v6.mp3');
+      const handler = mkHandler({
+        feed: mkFeed(mockFeed),
+        s3: undefined,
+        publishPublicUrl: 'http://[::1]:3000',
+      });
+      const result = await handler({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
+      });
+      expect(result.success).toBe(false);
+      fs.unlinkSync(f);
+    });
+
+    it('rejects localhost as loopback', async () => {
+      const f = mkFile('test_loopback_localhost.mp3');
+      const handler = mkHandler({
+        feed: mkFeed(mockFeed),
+        s3: undefined,
+        publishPublicUrl: 'http://localhost:3000',
+      });
+      const result = await handler({
+        outputFilename: 'test.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
+      });
+      expect(result.success).toBe(false);
+      fs.unlinkSync(f);
+    });
+
     it('rejects 127.0.0.2 as loopback', async () => {
-      const f = mkFile('test.mp3');
+      const f = mkFile('test_loopback_127.mp3');
       const handler = mkHandler({
         feed: mkFeed(mockFeed),
         s3: undefined,
@@ -334,7 +367,7 @@ describe('publish_podcast handler', () => {
     });
 
     it('rejects 127.0.0.1 as loopback', async () => {
-      const f = mkFile('test.mp3');
+      const f = mkFile('test_loopback_127_1.mp3');
       const handler = mkHandler({
         feed: mkFeed(mockFeed),
         s3: undefined,
@@ -349,7 +382,7 @@ describe('publish_podcast handler', () => {
     });
 
     it('rejects fe80:: as loopback', async () => {
-      const f = mkFile('test.mp3');
+      const f = mkFile('test_loopback_fe80.mp3');
       const handler = mkHandler({
         feed: mkFeed(mockFeed),
         s3: undefined,
@@ -364,7 +397,7 @@ describe('publish_podcast handler', () => {
     });
 
     it('rejects 0.0.0.0 as loopback', async () => {
-      const f = mkFile('test.mp3');
+      const f = mkFile('test_loopback_000.mp3');
       const handler = mkHandler({
         feed: mkFeed(mockFeed),
         s3: undefined,
@@ -379,7 +412,7 @@ describe('publish_podcast handler', () => {
     });
 
     it('rejects malformed URL', async () => {
-      const f = mkFile('test.mp3');
+      const f = mkFile('test_malformed.mp3');
       const handler = mkHandler({
         feed: mkFeed(mockFeed),
         s3: undefined,
@@ -394,7 +427,7 @@ describe('publish_podcast handler', () => {
     });
 
     it('rejects ftp protocol', async () => {
-      const f = mkFile('test.mp3');
+      const f = mkFile('test_ftp.mp3');
       const handler = mkHandler({
         feed: mkFeed(mockFeed),
         s3: undefined,
@@ -409,14 +442,14 @@ describe('publish_podcast handler', () => {
     });
 
     it('accepts valid https URL', async () => {
-      const f = mkFile('test.mp3');
+      const f = mkFile('test_https.mp3');
       const handler = mkHandler({
         feed: mkFeed(mockFeed),
         s3: undefined,
         publishPublicUrl: 'https://podcasts.example.com',
       });
       const result = await handler({
-        outputFilename: 'test.mp3',
+        outputFilename: 'test_https.mp3',
         episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
       });
       expect(result.success).toBe(true);
@@ -426,15 +459,44 @@ describe('publish_podcast handler', () => {
 
   describe('stat probe failure', () => {
     it('returns probe_stat_failed when stat fails on resolved path', async () => {
-      // This test would require mocking fs.statSync — skipped for now
-      expect(true).toBe(true);
+      // Create a broken symlink so stat fails on the resolved path
+      const f = mkFile('test_stat_fail.mp3');
+      fs.unlinkSync(f);
+      // Create a symlink to a non-existent target — realpath and stat both fail
+      const brokenLink = '/tmp/test_stat_fail_link.mp3';
+      try { fs.unlinkSync(brokenLink); } catch {}
+      fs.symlinkSync('/nonexistent_target.mp3', brokenLink);
+      const handler = mkHandler({
+        feed: mkFeed(mockFeed),
+        s3: { bucket: 'b', publicUrl: 'https://cdn.example.com' },
+        publishPublicUrl: 'https://cdn.example.com',
+      });
+      const result = await handler({
+        outputFilename: 'test_stat_fail_link.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
+      });
+      // Broken symlink → realpathSync fails → file_not_found (expected, since realpath fails before stat probe check)
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe('file_not_found');
+      fs.unlinkSync(brokenLink);
     });
   });
 
   describe('S3 nested key encoding', () => {
     it('encodes special chars in key segments', async () => {
-      // Would require mocking S3 upload — skipped for now
-      expect(true).toBe(true);
+      const f = mkFile('test_special.mp3');
+      const handler = mkHandler({
+        feed: mkFeed(mockFeed),
+        s3: { bucket: 'my-bucket', publicUrl: 'https://cdn.example.com' },
+        publishPublicUrl: 'https://cdn.example.com',
+      });
+      const result = await handler({
+        outputFilename: 'test_special.mp3',
+        episodeTitle: 'E1', episodeDescription: 'D', episodeGuid: 'ep-1', episodePublishedAt: '2024-01-01T00:00:00.000Z',
+      });
+      expect(result.success).toBe(true);
+      
+      fs.unlinkSync(f);
     });
   });
 });

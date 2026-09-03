@@ -26,8 +26,9 @@ function isValidRFC3339(raw: string): boolean {
   const month = Number(dateParts[1]);
   const day = Number(dateParts[2]);
   if (isNaN(year) || isNaN(month) || isNaN(day)) return false;
-  const rebuilt = new Date(year, month - 1, day);
-  if (rebuilt.getFullYear() !== year || rebuilt.getMonth() !== month - 1 || rebuilt.getDate() !== day) {
+  // Use UTC to avoid the 1900 year wrap for years 0-99
+  const rebuilt = new Date(Date.UTC(year, month - 1, day));
+  if (rebuilt.getUTCFullYear() !== year || rebuilt.getUTCMonth() !== month - 1 || rebuilt.getUTCDate() !== day) {
     return false;
   }
   // Validate time and offset components

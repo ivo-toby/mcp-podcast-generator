@@ -95,7 +95,11 @@ if (rssFeedUrl) {
         process.exit(1);
       }
     } catch {
-      // Invalid URL — allow it, feed backend will catch it at runtime
+      // Invalid URL — fatal, cannot construct enclosure URLs
+      logger.fatal(
+        `PUBLIC_URL "${pubUrl}" is not a valid URL — required for RSS-only enclosure URLs.`
+      );
+      process.exit(1);
     }
   }
 

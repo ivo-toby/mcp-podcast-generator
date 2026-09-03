@@ -162,7 +162,7 @@ Claude will call the tool and return the output path when done.
 | `OUTPUT_DIR` | | `/output` | Directory where MP3 files are written |
 | `TEMP_DIR` | | `/tmp/podcast-gen` | Temporary processing directory |
 | `PORT` | | `3000` | HTTP server port |
-| `PUBLIC_URL` | | `http://localhost:3000` | Base URL used to construct download links. For RSS-only mode this **must** be a public hostname (not localhost/127.0.0.1/[::1]). |
+| `PUBLIC_URL` | | `http://localhost:3000` | Base URL used to construct download links. For RSS-only mode this **must** be a public HTTP(S) hostname — localhost, 127.0.0.0/8, ::1, fe80::/10, and 0.0.0.0 are rejected. |
 | `S3_ENDPOINT` | | — | S3-compatible endpoint URL (e.g. `https://s3.amazonaws.com`). All 5 S3 vars must be set together. |
 | `S3_REGION` | | `us-east-1` | AWS region |
 | `S3_ACCESS_KEY_ID` | | — | S3 access key |
@@ -240,7 +240,7 @@ RSS PUT uses ETag-based concurrency control:
 - **RSS authentication** — Basic auth / API keys for feed URLs are not supported. Feed URLs must be publicly accessible.
 - **S3 public-read** — The bucket (or CDN) must allow public read for enclosure URLs to work.
 - **ETag precision** — If the feed server returns imprecise or missing ETags, concurrency falls back to last-write-wins.
-- **RSS-only** — When S3 is not configured, `PUBLIC_URL` is required and cannot be localhost/127.0.0.1/[::1].
+- **RSS-only** — When S3 is not configured, `PUBLIC_URL` is required and must be a public HTTP(S) URL (no loopback/localhost ranges).
 - **File size** — Files over 500 MB are rejected. The entire file is read into a Buffer for upload (to avoid stream retry issues).
 - **No streaming** — Large files are buffered in memory. For very large files consider increasing heap (`--max-old-space-size`).
 
@@ -454,7 +454,7 @@ export PODCAST_AUTHOR=Jane Doe
 
 Omit all to disable RSS. `PODCAST_LANGUAGE` defaults to `en-us`; `PODCAST_CATEGORIES` defaults to `Technology`.
 
-**RSS-only mode** (S3 not configured): `PUBLIC_URL` must be set and cannot resolve to `localhost`, `127.0.0.1`, or `::1`.
+**RSS-only mode** (S3 not configured): `PUBLIC_URL` must be set and must resolve to a public HTTP(S) hostname — `localhost`, `127.*`, `::1`, `fe80::*`, and `0.0.0.0` are rejected. Malformed or non-HTTP(S) URLs also fail.
 
 ### Publish Tool
 

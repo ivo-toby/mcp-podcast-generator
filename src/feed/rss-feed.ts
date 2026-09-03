@@ -59,13 +59,23 @@ export class RssFeedBackend implements FeedBackend {
 
     if (fetchRes.status === 404) {
       // Feed doesn't exist — create it
-      const xml = this.createFeed(episode, media);
+      let xml: string;
+      try {
+        xml = this.createFeed(episode, media);
+      } catch (err) {
+        throw new FeedError('rss_create_failed', `serialization error: ${err instanceof Error ? err.message : String(err)}`);
+      }
       await this.putWithRetry(feedUrl, xml, undefined, true, episode, media);
       return { feedUrl, episodeGuid: episode.guid };
     }
 
     if (fetchRes.status === 200) {
-      const existingXml = await fetchRes.text();
+      let existingXml: string;
+      try {
+        existingXml = await fetchRes.text();
+      } catch (err) {
+        throw new FeedError('rss_fetch_failed', `body read error: ${err instanceof Error ? err.message : String(err)}`);
+      }
       const etag = fetchRes.headers.get('etag') ?? undefined;
 
       const xml = await this.updateFeed(existingXml, episode, media);
@@ -118,7 +128,13 @@ export class RssFeedBackend implements FeedBackend {
       },
     };
 
-    return new Builder(BUILDER_OPTS).buildObject(rss) as string;
+    let xml: string;
+    try {
+      xml = new Builder(BUILDER_OPTS).buildObject(rss) as string;
+    } catch (err) {
+      throw new FeedError('rss_create_failed', `build error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return xml;
   }
 
   /**
@@ -164,7 +180,13 @@ export class RssFeedBackend implements FeedBackend {
     if (!ns['xmlns:dc']) ns['xmlns:dc'] = 'http://purl.org/dc/elements/1.1/';
     if (!ns['xmlns:content']) ns['xmlns:content'] = 'http://purl.org/rss/1.0/modules/content/';
 
-    return new Builder(BUILDER_OPTS).buildObject(parsed) as string;
+    let xml: string;
+    try {
+      xml = new Builder(BUILDER_OPTS).buildObject(parsed) as string;
+    } catch (err) {
+      throw new FeedError('rss_update_failed', `build error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return xml;
   }
 
   /**
@@ -263,11 +285,15 @@ export class RssFeedBackend implements FeedBackend {
       if (fetchRes.status === 404) {
         // Feed disappeared between GET and PUT — always fail.
         // Only a 404 from the conflict re-fetch is handled below.
-        throw new FeedError(`rss_${mode}_failed: feed not found`);
+        throw new FeedError(`rss_${mode}_failed`, 'feed not found');
       }
 
       if (fetchRes.status === 412 || fetchRes.status === 409) {
-        // Concurrency conflict — re-fetch and retry
+        // Concurrency conflict — re-fetch and retry.
+        // On the final attempt, throw immediately (no retry remaining).
+        if (attempt === MAX_RETRY_COUNT - 1) {
+          throw new FeedError(`rss_${mode}_failed`, `conflict: ${fetchRes.status}`);
+        }
         let getRes: Response;
         try {
           getRes = await fetch(feedUrl, {
@@ -278,9 +304,20 @@ export class RssFeedBackend implements FeedBackend {
         }
 
         if (getRes.status === 200) {
+          let existingXml: string;
+          try {
+            existingXml = await getRes.text();
+          } catch (err) {
+            throw new FeedError('rss_fetch_failed', `body read error: ${err instanceof Error ? err.message : String(err)}`);
+          }
           currentEtag = getRes.headers.get('etag') ?? undefined;
-          const existingXml = await getRes.text();
-          currentXml = await this.updateFeed(existingXml, _episode, _media);
+          let mergedXml: string;
+          try {
+            mergedXml = await this.updateFeed(existingXml, _episode, _media);
+          } catch (err) {
+            throw new FeedError('rss_update_failed', `merge error: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          currentXml = mergedXml;
           mode = 'update';
           // Continue the loop to retry the PUT
           await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS[attempt]));
@@ -298,15 +335,15 @@ export class RssFeedBackend implements FeedBackend {
         }
 
         // Other status on GET (500, etc.) — no valid feed to retry with
-        throw new FeedError(`rss_fetch_failed: GET returned ${getRes.status}`);
+        throw new FeedError('rss_fetch_failed', `GET returned ${getRes.status}`);
       }
 
       // Other error status — give up
-      throw new FeedError(`rss_${mode}_failed: PUT returned ${fetchRes.status}`);
+      throw new FeedError(`rss_${mode}_failed`, `PUT returned ${fetchRes.status}`);
     }
 
     // All retries exhausted — no further PUTs allowed.
-    throw new FeedError('rss_' + mode + '_failed: max retries exceeded');
+    throw new FeedError(`rss_${mode}_failed`, 'max retries exceeded');
   }
 }
 
@@ -372,9 +409,11 @@ function truncateAtWord(text: string, maxLength: number, includeEllipsis?: boole
 
   const ellipsis = includeEllipsis ? '...' : '';
   let truncated = text.slice(0, maxLength - ellipsis.length);
-  const lastSpace = truncated.lastIndexOf(' ');
-  if (lastSpace > 0) {
-    truncated = truncated.slice(0, lastSpace);
+  const lastWs = truncated.search(/\s$/);
+  if (lastWs > 0) {
+    truncated = truncated.slice(0, lastWs);
+  } else if (lastWs === 0) {
+    truncated = '';
   }
   return truncated + ellipsis;
 }

@@ -48,9 +48,14 @@ export class RssFeedBackend implements FeedBackend {
     episode: EpisodeMetadata,
     media: { url: string; lengthBytes: number; mimeType: string }
   ): Promise<FeedResult> {
-    const fetchRes = await fetch(feedUrl, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    let fetchRes: Response;
+    try {
+      fetchRes = await fetch(feedUrl, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+    } catch (err) {
+      throw new FeedError('rss_fetch_failed', `network error: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     if (fetchRes.status === 404) {
       // Feed doesn't exist — create it
@@ -68,7 +73,7 @@ export class RssFeedBackend implements FeedBackend {
       return { feedUrl, episodeGuid: episode.guid };
     }
 
-    throw new FeedError(`rss_fetch_failed: unexpected status ${fetchRes.status}`);
+    throw new FeedError('rss_fetch_failed', `unexpected status ${fetchRes.status}`);
   }
 
   /**
@@ -130,12 +135,12 @@ export class RssFeedBackend implements FeedBackend {
     try {
       parsed = await parseStringPromise(existingXml, PARSER_OPTS as any);
     } catch {
-      throw new FeedError('rss_update_failed');
+      throw new FeedError('rss_update_failed', 'parse error');
     }
 
     const channel = parsed?.rss?.channel?.[0];
     if (!channel) {
-      throw new FeedError('rss_update_failed');
+      throw new FeedError('rss_update_failed', 'no channel');
     }
 
     // Ensure items array exists (xml2js omits key when no <item> exists)
@@ -145,7 +150,7 @@ export class RssFeedBackend implements FeedBackend {
     for (const item of channel.item) {
       const guid = extractGuid(item);
       if (guid === episode.guid) {
-        throw new FeedError('rss_duplicate_guid');
+        throw new FeedError('rss_duplicate_guid', 'duplicate GUID found');
       }
     }
 
@@ -189,7 +194,6 @@ export class RssFeedBackend implements FeedBackend {
       'itunes:title': episode.title,
       'itunes:description': truncateAtWord(episode.description, 4000, false),
       'itunes:author': this.podcast.author,
-      'itunes:explicit': 'false',
     };
 
     if (episode.episodeNumber !== undefined) {
@@ -201,6 +205,8 @@ export class RssFeedBackend implements FeedBackend {
     if (episode.durationSeconds !== undefined) {
       item['itunes:duration'] = formatDuration(episode.durationSeconds);
     }
+    // 'itunes:explicit' placed last to match the exact template order.
+    item['itunes:explicit'] = 'false';
 
     return item;
   }
@@ -237,12 +243,17 @@ export class RssFeedBackend implements FeedBackend {
       }
       // else: update mode without ETag → no precondition header (last-write-wins)
 
-      const fetchRes = await fetch(feedUrl, {
-        method: 'PUT',
-        headers,
-        body: currentXml ?? xml,
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      });
+      let fetchRes: Response;
+      try {
+        fetchRes = await fetch(feedUrl, {
+          method: 'PUT',
+          headers,
+          body: currentXml ?? xml,
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+      } catch (err) {
+        throw new FeedError(`rss_${mode}_failed`, `network error: ${err instanceof Error ? err.message : String(err)}`);
+      }
 
       if (fetchRes.status >= 200 && fetchRes.status < 300) {
         // Success
@@ -250,20 +261,21 @@ export class RssFeedBackend implements FeedBackend {
       }
 
       if (fetchRes.status === 404) {
-        // Feed disappeared between GET and PUT
-        if (mode === 'update') {
-          throw new FeedError('rss_update_failed');
-        }
-        // In create mode, the feed still doesn't exist — just re-PUT
-        await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS[attempt]));
-        continue;
+        // Feed disappeared between GET and PUT — always fail.
+        // Only a 404 from the conflict re-fetch is handled below.
+        throw new FeedError(`rss_${mode}_failed: feed not found`);
       }
 
       if (fetchRes.status === 412 || fetchRes.status === 409) {
         // Concurrency conflict — re-fetch and retry
-        const getRes = await fetch(feedUrl, {
-          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        });
+        let getRes: Response;
+        try {
+          getRes = await fetch(feedUrl, {
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+          });
+        } catch (err) {
+          throw new FeedError('rss_fetch_failed', `network error during re-fetch: ${err instanceof Error ? err.message : String(err)}`);
+        }
 
         if (getRes.status === 200) {
           currentEtag = getRes.headers.get('etag') ?? undefined;
@@ -278,7 +290,7 @@ export class RssFeedBackend implements FeedBackend {
         if (getRes.status === 404) {
           // Feed was deleted during retry
           if (mode === 'update') {
-            throw new FeedError('rss_update_failed');
+            throw new FeedError('rss_update_failed', 'feed deleted during update');
           }
           // Create mode — feed still doesn't exist, continue retry loop
           await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS[attempt]));
@@ -290,36 +302,11 @@ export class RssFeedBackend implements FeedBackend {
       }
 
       // Other error status — give up
-      throw new FeedError('rss_' + mode + '_failed');
+      throw new FeedError(`rss_${mode}_failed: PUT returned ${fetchRes.status}`);
     }
 
-    // All retries exhausted — build final XML if create-to-update transition happened
-    let finalXml = currentXml;
-    if (mode === 'update') {
-      const getRes = await fetch(feedUrl, {
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      });
-      if (getRes.status === 200) {
-        const etag = getRes.headers.get('etag') ?? undefined;
-        const existingXml = await getRes.text();
-        finalXml = await this.updateFeed(existingXml, _episode, _media);
-      }
-    }
-
-    if (finalXml) {
-      await fetch(feedUrl, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/rss+xml',
-          ...(currentEtag && mode === 'update' ? { 'If-Match': currentEtag } : {}),
-          ...(!currentEtag && mode === 'create' ? { 'If-None-Match': '*' } : {}),
-        },
-        body: finalXml,
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      });
-    }
-
-    throw new FeedError('rss_' + mode + '_failed');
+    // All retries exhausted — no further PUTs allowed.
+    throw new FeedError('rss_' + mode + '_failed: max retries exceeded');
   }
 }
 
@@ -329,13 +316,10 @@ export class RssFeedBackend implements FeedBackend {
 export class FeedError extends Error {
   readonly code: string;
 
-  constructor(message: string) {
-    super(message);
+  constructor(code: string, detail?: string) {
+    super(detail ? `${code}: ${detail}` : code);
     this.name = 'FeedError';
-    // Derive the stable code from the message prefix before the first colon+space.
-    // If no prefix is found, default to 'rss_unknown'.
-    const colonIdx = message.indexOf(': ');
-    this.code = colonIdx >= 0 ? message.slice(0, colonIdx) : 'rss_unknown';
+    this.code = code;
   }
 }
 
@@ -356,9 +340,10 @@ function extractGuid(item: Record<string, unknown>): string | undefined {
  * Format seconds as HH:MM:SS.
  */
 export function formatDuration(totalSeconds: number): string {
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = Math.round(totalSeconds % 60);
+  const rounded = Math.round(totalSeconds);
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const seconds = rounded % 60;
 
   const hh = String(hours).padStart(2, '0');
   const mm = String(minutes).padStart(2, '0');

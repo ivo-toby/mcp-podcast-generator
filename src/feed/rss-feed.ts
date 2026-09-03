@@ -211,7 +211,7 @@ export class RssFeedBackend implements FeedBackend {
       enclosure: {
         $: {
           url: media.url,
-          type: media.mimeType,
+          type: 'audio/mpeg',
           length: String(media.lengthBytes),
         },
       },
@@ -418,7 +418,14 @@ function truncateAtWord(text: string, maxLength: number, includeEllipsis?: boole
 
   const ellipsis = includeEllipsis ? '...' : '';
   let truncated = text.slice(0, maxLength - ellipsis.length);
-  const lastWs = truncated.search(/\s+$/);
+  // Find the last whitespace character scanning from the right.
+  let lastWs = -1;
+  for (let i = truncated.length - 1; i >= 0; i--) {
+    if (/\s/.test(truncated[i])) {
+      lastWs = i;
+      break;
+    }
+  }
   if (lastWs > 0) {
     truncated = truncated.slice(0, lastWs);
   }

@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
 import { RssFeedBackend, FeedError } from '../../src/feed/rss-feed.js';
-import type { PodcastMetadata, EpisodeMetadata, MediaAsset } from '../../src/feed/feed-types.js';
+import type { PodcastMetadata, EpisodeMetadata } from '../../src/feed/feed-types.js';
+import type { MediaAsset } from '../../src/storage/storage-types.js';
 
 // ---------------------------------------------------------------------------
 // HTTP mock — supports a queue of responses

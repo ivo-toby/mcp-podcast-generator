@@ -14,22 +14,29 @@ import { logger } from '../utils/logger.js';
 
 /** RFC 3339 / ISO 8601 datetime pattern. */
 /** Validates a string is a strict RFC 3339 datetime.
- * Rejects values that JavaScript silently normalizes (e.g. 2024-02-30 → 2024-03-01).
+ * Rejects values that JavaScript silently normalizes (e.g. 2024-02-30 → 2024-03-01,
+ * 2024-01-01T24:00:00Z). Validates date AND time components explicitly.
  */
 function isValidRFC3339(raw: string): boolean {
   if (!RFC3339_REGEX.test(raw)) return false;
-  const d = new Date(raw);
-  if (isNaN(d.getTime())) return false;
-  // Reject values where JS silently overflows month/day
-  const parts = raw.split('T')[0].split('-');
-  const year = Number(parts[0]);
-  const month = Number(parts[1]);
-  const day = Number(parts[2]);
-  // Rebuild the date — if JS normalizes it, the components won't match
+  // Validate date components (reject JS normalization of invalid dates)
+  const dateParts = raw.split('T')[0].split('-');
+  const year = Number(dateParts[0]);
+  const month = Number(dateParts[1]);
+  const day = Number(dateParts[2]);
   const rebuilt = new Date(year, month - 1, day);
   if (rebuilt.getFullYear() !== year || rebuilt.getMonth() !== month - 1 || rebuilt.getDate() !== day) {
     return false;
   }
+  // Validate time components — reject values like T24:00:00
+  const timeStr = raw.split('T')[1].split(/[Z+]/)[0];
+  const timeParts = timeStr.split(':');
+  const hour = Number(timeParts[0]);
+  const minute = Number(timeParts[1]);
+  const second = Number(timeParts[2]);
+  if (hour < 0 || hour > 23) return false;
+  if (minute < 0 || minute > 59) return false;
+  if (second < 0 || second > 59) return false;
   return true;
 }
 
@@ -230,6 +237,7 @@ async function executePublish(
       s3: skipResult('stat_failed'),
       rss: skipResult('stat_failed'),
       errorCode: 'probe_stat_failed',
+      probeStatFailed: true,
     });
   }
 
@@ -293,9 +301,20 @@ async function executePublish(
     // Only attempt RSS if we have a valid MediaAsset
     if (!mediaAsset) {
       if (opts.publishPublicUrl) {
-        // RSS-only fallback: construct URL from publishPublicUrl
-        const normalizedUrl = opts.publishPublicUrl.replace(/\/+$/, '');
-        if (!normalizedUrl) {
+        // RSS fallback: construct URL from publishPublicUrl.
+        // Reject loopback/localhost hosts — they are unreachable from podcast clients.
+        let normalizedUrl = opts.publishPublicUrl.replace(/\/+$/, '');
+        let isLoopback = false;
+        try {
+          const parsed = new URL(normalizedUrl);
+          const normalizedHostname = parsed.hostname.replace(/^\[/, '').replace(/\]$/, '');
+          if (['localhost', '127.0.0.1', '::1'].includes(normalizedHostname)) {
+            isLoopback = true;
+          }
+        } catch { /* already invalid, caught below */ }
+        if (isLoopback) {
+          rssResult = { status: 'failed', errorCode: 'rss_missing_media_url', errorMessage: 'publishPublicUrl is a loopback address — required for RSS enclosure URLs' };
+        } else if (!normalizedUrl) {
           rssResult = { status: 'failed', errorCode: 'rss_missing_media_url', errorMessage: 'publishPublicUrl is empty or only slashes' };
         } else {
           const encodedFilename = encodeURIComponent(filename);

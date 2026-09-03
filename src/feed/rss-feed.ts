@@ -4,6 +4,7 @@ import {
 } from 'xml2js';
 import type {
   FeedBackend,
+  FeedErrorCode,
   EpisodeMetadata,
   PodcastMetadata,
   FeedResult,
@@ -277,7 +278,8 @@ export class RssFeedBackend implements FeedBackend {
           signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
       } catch (err) {
-        throw new FeedError(`rss_${mode}_failed`, `network error: ${err instanceof Error ? err.message : String(err)}`);
+        const modeCode = mode === 'create' ? 'rss_create_failed' : 'rss_update_failed';
+        throw new FeedError(modeCode, `network error: ${err instanceof Error ? err.message : String(err)}`);
       }
 
       if (fetchRes.status >= 200 && fetchRes.status < 300) {
@@ -288,14 +290,16 @@ export class RssFeedBackend implements FeedBackend {
       if (fetchRes.status === 404) {
         // Feed disappeared between GET and PUT — always fail.
         // Only a 404 from the conflict re-fetch is handled below.
-        throw new FeedError(`rss_${mode}_failed`, 'feed not found');
+        const modeCode = mode === 'create' ? 'rss_create_failed' : 'rss_update_failed';
+        throw new FeedError(modeCode, 'feed not found');
       }
 
       if (fetchRes.status === 412 || fetchRes.status === 409) {
         // Concurrency conflict — re-fetch and retry.
         // On the final attempt, throw immediately (no retry remaining).
         if (attempt === MAX_RETRY_COUNT - 1) {
-          throw new FeedError(`rss_${mode}_failed`, `conflict: ${fetchRes.status}`);
+          const modeCode = mode === 'create' ? 'rss_create_failed' : 'rss_update_failed';
+          throw new FeedError(modeCode, `conflict: ${fetchRes.status}`);
         }
         let getRes: Response;
         try {
@@ -348,11 +352,13 @@ export class RssFeedBackend implements FeedBackend {
       }
 
       // Other error status — give up
-      throw new FeedError(`rss_${mode}_failed`, `PUT returned ${fetchRes.status}`);
+      const modeCode = mode === 'create' ? 'rss_create_failed' : 'rss_update_failed';
+      throw new FeedError(modeCode, `PUT returned ${fetchRes.status}`);
     }
 
     // All retries exhausted — no further PUTs allowed.
-    throw new FeedError(`rss_${mode}_failed`, 'max retries exceeded');
+    const finalCode = mode === 'create' ? 'rss_create_failed' : 'rss_update_failed';
+    throw new FeedError(finalCode, 'max retries exceeded');
   }
 }
 
@@ -360,9 +366,9 @@ export class RssFeedBackend implements FeedBackend {
  * Error with a stable `.code` property for discriminated error handling.
  */
 export class FeedError extends Error {
-  readonly code: string;
+  readonly code: FeedErrorCode;
 
-  constructor(code: string, detail?: string) {
+  constructor(code: FeedErrorCode, detail?: string) {
     super(detail ? `${code}: ${detail}` : code);
     this.name = 'FeedError';
     this.code = code;

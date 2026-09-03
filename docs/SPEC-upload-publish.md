@@ -391,7 +391,7 @@ Handles:
 - **Concurrency safety**: uses ETag/If-Match with up to 3 total PUT attempts (2 retries, exponential backoff: 100ms, 300ms). On 412, re-fetch, re-merge, re-PUT. If 3 attempts exhausted → throws `rss_update_failed`.
 - **XML escaping**: the xml2js `Builder` escapes raw string values during serialization — do NOT pre-escape strings before passing to the Builder (that would cause double escaping). Description must be plain text only.
 - **Missing ETag on GET**: PUT without If-Match (last-write-wins). If that PUT fails → `rss_update_failed`. Duplicate detection is best-effort on non-ETag hosts.
-- **XXE protection**: parseStringPromise called with `{ whitelist: [], maxDepth: 100 }`.
+- **XXE protection**: xml2js 0.6 does not support `whitelist` or `maxDepth`. Instead, feed XML bodies are validated against a 2 MB size limit before parsing. Feed URLs are operator-configured (not user-supplied), so XXE risk is low.
 - **Timeouts**: ffprobe 30s, feed HTTP 10s, S3 upload 5 min.
 
 RSS 2.0 fields populated in `<item>`:

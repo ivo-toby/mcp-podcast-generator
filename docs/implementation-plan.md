@@ -77,7 +77,7 @@ Based on `docs/SPEC-upload-publish.md` and `docs/research-api-integration.md`.
   - On failure after retries → throw `rss_create_failed` (mode === 'create') or `rss_update_failed` (mode === 'update')
   - Tests: initial create PUT sends If-None-Match: *; initial update PUT sends If-Match: etag; 409 GET 200 transitions to mode 'update'; 412 GET 404 in update mode → rss_update_failed; 412 GET 404 in create mode → stays create mode
 - Helper functions: `toRFC822()`, `formatDuration()` — NO manual xmlEscape; xml2js Builder already escapes text content. Pass raw strings to Builder. `toRFC822()` formats in UTC.
-- `parseStringPromise` called with `{ whitelist: [], maxDepth: 100 }` for XXE protection.
+- `parseStringPromise` called with empty options; feed XML bodies validated against a 2 MB size limit before parsing (operator-configured URLs, low XXE risk).
 
 #### T6: `src/feed/index.ts`
 - Re-export `FeedBackend`, `EpisodeMetadata`, `PodcastMetadata`, `FeedResult`, `StageResult`, `PublishResult`, `RssFeedBackend`
@@ -209,7 +209,7 @@ Based on `docs/SPEC-upload-publish.md` and `docs/research-api-integration.md`.
 - 409 in update mode + GET 404 → rss_update_failed; 409 in create mode + GET 404 → stay in create mode
 - Empty feed update: feed with zero items (`channel.item` absent from parsed object) → `??= []` before appending
 - iTunes description truncation to 4,000 chars (not bytes) at word boundary
-- XXE protection: parseStringPromise called with `{ whitelist: [], maxDepth: 100 }`
+- XXE protection: feed XML bodies validated against a 2 MB size limit before parsing (operator-configured URLs, low XXE risk)
 
 #### T16: `tests/tools/publish-podcast.test.ts`
 - Both S3 and RSS work together (full success)

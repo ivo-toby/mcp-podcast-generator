@@ -76,6 +76,18 @@ export interface PublishResult {
 }
 
 /**
+ * Stable error codes emitted by feed operations.
+ *
+ * Every FeedError must use one of these codes so callers can
+ * discriminate without string comparison.
+ */
+export type FeedErrorCode =
+  | 'rss_fetch_failed'
+  | 'rss_create_failed'
+  | 'rss_update_failed'
+  | 'rss_duplicate_guid';
+
+/**
  * Feed backend abstraction (S3, Podlove, Spotify, etc.).
  */
 export interface FeedBackend {

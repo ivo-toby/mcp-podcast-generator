@@ -1,6 +1,5 @@
 import {
   Builder,
-  Parser,
   parseStringPromise,
 } from 'xml2js';
 import type {
@@ -9,12 +8,8 @@ import type {
   PodcastMetadata,
   FeedResult,
 } from './feed-types.js';
-import { childLogger } from '../utils/logger.js';
-
-const log = childLogger('rss-feed');
-
-const MAX_RETRY_COUNT = 3; // 3 total PUT attempts = 2 retries
-const RETRY_BACKOFF_MS = [100, 300];
+const MAX_RETRY_COUNT = 3;
+const RETRY_BACKOFF_MS = [100, 300]; // 2 retries: attempt 0→1 = 100ms, attempt 1→2 = 300ms
 const FETCH_TIMEOUT_MS = 10_000;
 
 /**
@@ -31,7 +26,9 @@ const BUILDER_OPTS = {
 /**
  * Shared xml2js parser options — XXE protection.
  */
-const PARSER_OPTS = {
+// xml2js does not support XXE protection options natively;
+// feed URLs are operator-configured (not user-supplied), so risk is low.
+const PARSER_OPTS: Record<string, unknown> = {
   whitelist: [],
   maxDepth: 100,
 };
@@ -129,11 +126,16 @@ export class RssFeedBackend implements FeedBackend {
     episode: EpisodeMetadata,
     media: { url: string; lengthBytes: number; mimeType: string }
   ): Promise<string> {
-    const parsed = (await parseStringPromise(existingXml)) as any;
+    let parsed: any;
+    try {
+      parsed = await parseStringPromise(existingXml, PARSER_OPTS as any);
+    } catch {
+      throw new FeedError('rss_update_failed');
+    }
 
-    const channel = parsed.rss?.channel?.[0];
+    const channel = parsed?.rss?.channel?.[0];
     if (!channel) {
-      throw new FeedError('rss_update_failed: parsed XML has no channel');
+      throw new FeedError('rss_update_failed');
     }
 
     // Ensure items array exists (xml2js omits key when no <item> exists)
@@ -150,8 +152,9 @@ export class RssFeedBackend implements FeedBackend {
     // Append new item
     channel.item.push(this.buildItem(episode, media));
 
-    // Namespace repair — ensure xmlns declarations are present
-    const ns = parsed.rss?.$ ?? {};
+    // Namespace repair — ensure xmlns declarations are present on the actual root
+    parsed.rss.$ ??= {};
+    const ns = parsed.rss.$;
     if (!ns['xmlns:itunes']) ns['xmlns:itunes'] = 'http://www.itunes.com/dtds/podcast-1.0.dtd';
     if (!ns['xmlns:dc']) ns['xmlns:dc'] = 'http://purl.org/dc/elements/1.1/';
     if (!ns['xmlns:content']) ns['xmlns:content'] = 'http://purl.org/rss/1.0/modules/content/';
@@ -170,19 +173,21 @@ export class RssFeedBackend implements FeedBackend {
       title: episode.title,
       link: media.url,
       guid: {
-        '@_isPermaLink': 'false',
+        $: { isPermaLink: 'false' },
         _: episode.guid,
       },
       description: episode.description,
       pubDate: toRFC822(new Date(episode.publishedAt)),
       enclosure: {
-        '@_url': media.url,
-        '@_type': media.mimeType,
-        '@_length': String(media.lengthBytes),
+        $: {
+          url: media.url,
+          type: media.mimeType,
+          length: String(media.lengthBytes),
+        },
       },
       'content:encoded': episode.description,
       'itunes:title': episode.title,
-      'itunes:description': truncateAtWord(episode.description, 4000),
+      'itunes:description': truncateAtWord(episode.description, 4000, false),
       'itunes:author': this.podcast.author,
       'itunes:explicit': 'false',
     };
@@ -216,22 +221,26 @@ export class RssFeedBackend implements FeedBackend {
   ): Promise<void> {
     let mode: 'create' | 'update' = isCreate ? 'create' : 'update';
     let currentEtag: string | undefined = etag;
+    let currentXml: string | undefined = xml; // mutable — updated on 409/412 re-merge
 
     for (let attempt = 0; attempt < MAX_RETRY_COUNT; attempt++) {
       const headers: Record<string, string> = {
         'Content-Type': 'application/rss+xml',
       };
 
-      if (mode === 'update' && currentEtag) {
-        headers['If-Match'] = currentEtag;
-      } else {
+      // Only send If-None-Match in create mode.
+      // In update mode without ETag: unconditional PUT (last-write-wins).
+      if (mode === 'create' && !currentEtag) {
         headers['If-None-Match'] = '*';
+      } else if (mode === 'update' && currentEtag) {
+        headers['If-Match'] = currentEtag;
       }
+      // else: update mode without ETag → no precondition header (last-write-wins)
 
       const fetchRes = await fetch(feedUrl, {
         method: 'PUT',
         headers,
-        body: xml,
+        body: currentXml ?? xml,
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
 
@@ -246,6 +255,7 @@ export class RssFeedBackend implements FeedBackend {
           throw new FeedError('rss_update_failed');
         }
         // In create mode, the feed still doesn't exist — just re-PUT
+        await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS[attempt]));
         continue;
       }
 
@@ -258,9 +268,10 @@ export class RssFeedBackend implements FeedBackend {
         if (getRes.status === 200) {
           currentEtag = getRes.headers.get('etag') ?? undefined;
           const existingXml = await getRes.text();
-          const updatedXml = await this.updateFeed(existingXml, _episode, _media);
+          currentXml = await this.updateFeed(existingXml, _episode, _media);
           mode = 'update';
           // Continue the loop to retry the PUT
+          await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS[attempt]));
           continue;
         }
 
@@ -270,6 +281,7 @@ export class RssFeedBackend implements FeedBackend {
             throw new FeedError('rss_update_failed');
           }
           // Create mode — feed still doesn't exist, continue retry loop
+          await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS[attempt]));
           continue;
         }
 
@@ -278,11 +290,36 @@ export class RssFeedBackend implements FeedBackend {
       }
 
       // Other error status — give up
-      throw new FeedError(`rss_${mode}_failed: PUT returned ${fetchRes.status}`);
+      throw new FeedError('rss_' + mode + '_failed');
     }
 
-    // All retries exhausted
-    throw new FeedError(`rss_${mode}_failed: max retries (${MAX_RETRY_COUNT}) exhausted`);
+    // All retries exhausted — build final XML if create-to-update transition happened
+    let finalXml = currentXml;
+    if (mode === 'update') {
+      const getRes = await fetch(feedUrl, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      if (getRes.status === 200) {
+        const etag = getRes.headers.get('etag') ?? undefined;
+        const existingXml = await getRes.text();
+        finalXml = await this.updateFeed(existingXml, _episode, _media);
+      }
+    }
+
+    if (finalXml) {
+      await fetch(feedUrl, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/rss+xml',
+          ...(currentEtag && mode === 'update' ? { 'If-Match': currentEtag } : {}),
+          ...(!currentEtag && mode === 'create' ? { 'If-None-Match': '*' } : {}),
+        },
+        body: finalXml,
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+    }
+
+    throw new FeedError('rss_' + mode + '_failed');
   }
 }
 
@@ -292,10 +329,13 @@ export class RssFeedBackend implements FeedBackend {
 export class FeedError extends Error {
   readonly code: string;
 
-  constructor(code: string) {
-    super(code);
+  constructor(message: string) {
+    super(message);
     this.name = 'FeedError';
-    this.code = code;
+    // Derive the stable code from the message prefix before the first colon+space.
+    // If no prefix is found, default to 'rss_unknown'.
+    const colonIdx = message.indexOf(': ');
+    this.code = colonIdx >= 0 ? message.slice(0, colonIdx) : 'rss_unknown';
   }
 }
 
@@ -318,7 +358,7 @@ function extractGuid(item: Record<string, unknown>): string | undefined {
 export function formatDuration(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
+  const seconds = Math.round(totalSeconds % 60);
 
   const hh = String(hours).padStart(2, '0');
   const mm = String(minutes).padStart(2, '0');
@@ -342,13 +382,14 @@ export function toRFC822(date: Date): string {
  * Splits at the last whitespace before the limit so that partial words
  * are not emitted.
  */
-function truncateAtWord(text: string, maxLength: number): string {
+function truncateAtWord(text: string, maxLength: number, includeEllipsis?: boolean): string {
   if (text.length <= maxLength) return text;
 
-  let truncated = text.slice(0, maxLength);
+  const ellipsis = includeEllipsis ? '...' : '';
+  let truncated = text.slice(0, maxLength - ellipsis.length);
   const lastSpace = truncated.lastIndexOf(' ');
   if (lastSpace > 0) {
     truncated = truncated.slice(0, lastSpace);
   }
-  return truncated + '...';
+  return truncated + ellipsis;
 }

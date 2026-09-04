@@ -275,7 +275,7 @@ describe('RssFeedBackend', () => {
     it('re-fetches on 412 and retries PUT', async () => {
       enqueueResults(
         { status: 'ok', xml: existingFeedXml, etag: '"abc"' },
-        { status: 'ok' },
+        { putError: new FeedError('rss_update_failed', 'Precondition Failed') },
         { status: 'ok', xml: existingFeedXml, etag: '"def"' },
         { status: 'ok' }
       );
@@ -283,6 +283,7 @@ describe('RssFeedBackend', () => {
       const mockStorage = createMockStorageBackend();
       const backend = new RssFeedBackend(podcastMetadata, mockStorage, 'https://pub.example.com/podcast.xml');
       await backend.addEpisode('https://pub.example.com/podcast.xml', episodeMetadata, mediaAsset);
+      expect(putXml).toContain('Episode 1');
     });
 
     it('throws rss_update_failed after PUT failure', async () => {
@@ -332,6 +333,67 @@ describe('RssFeedBackend', () => {
         const feedErr = err as FeedError;
         expect(feedErr.code).toBe('rss_create_failed');
       }
+    });
+
+    it('re-fetches and retries PUT on S3 409 conflict', async () => {
+      const existingFeed = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Test Podcast</title>
+    <link>https://example.com</link>
+    <description>Test.</description>
+  </channel>
+</rss>`;
+
+      enqueueResults(
+        { status: 'ok', xml: existingFeed, etag: '"abc"' },
+        { putError: new FeedError('rss_create_failed', 'Conflict') },
+        { status: 'ok', xml: existingFeed, etag: '"def"' },
+        { status: 'ok' }
+      );
+
+      const mockStorage = createMockStorageBackend();
+      const backend = new RssFeedBackend(podcastMetadata, mockStorage, 'https://pub.example.com/podcast.xml');
+      await backend.addEpisode('https://pub.example.com/podcast.xml', episodeMetadata, mediaAsset);
+      expect(putXml).toContain('Episode 1');
+    });
+  });
+
+  describe('S3 conditional writes', () => {
+    it('sends IfNoneMatch: * on create (no etag)', async () => {
+      let sentIfNoneMatch: string | undefined;
+      enqueueResults(
+        { status: 'not-found' }
+      );
+      // Override the mock to capture the command sent to S3
+      const mockStorage = {
+        get client() {
+          return {
+            send: async (command: any) => {
+              sentIfNoneMatch = command?.input?.IfNoneMatch;
+              return { ETag: '"new-etag"' };
+            },
+          };
+        },
+        get config() {
+          return {
+            endpoint: 'https://r2.example.com',
+            region: 'auto',
+            accessKeyId: 'test-key',
+            secretAccessKey: 'test-secret',
+            bucket: 'test-bucket',
+            publicUrl: 'https://pub.example.com',
+            forcePathStyle: true,
+          };
+        },
+        putString: async (key: string, body: string, contentType: string, etag?: string, isCreate?: boolean) => {
+          return;
+        },
+      } as unknown as S3StorageBackend;
+
+      const backend = new RssFeedBackend(podcastMetadata, mockStorage, 'https://pub.example.com/podcast.xml');
+      await backend.addEpisode('https://pub.example.com/podcast.xml', episodeMetadata, mediaAsset);
+      expect(sentIfNoneMatch).toBe('*');
     });
   });
 

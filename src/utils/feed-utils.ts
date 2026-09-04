@@ -12,8 +12,8 @@ export function deriveFeedKey(feedUrl: string, s3Config: S3Config | null): strin
     const feedU = new URL(feedUrl);
     if (!s3Config) {
       // RSS-only (no S3) — use the feed URL pathname directly
-      let path = feedU.pathname;
-      if (path.endsWith('/') && path !== '/') path = path.slice(0, -1);
+      let path = feedU.pathname.replace(/\/*$/, '');
+      if (path.startsWith('/')) path = path.slice(1);
       return path || 'podcast.xml';
     }
     const pubU = new URL(s3Config.publicUrl.replace(/\/*$/, ''));

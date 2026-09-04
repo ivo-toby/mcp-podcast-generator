@@ -512,22 +512,37 @@ describe('RssFeedBackend', () => {
     });
 
     it('preserves requested episode on HTTP 412 retry', async () => {
+      let callIdx = 0;
+      let capturedXml: string | null = null;
       globalThis.fetch = async (_url: string, init?: RequestInit) => {
-        if (!init?.method) {
+        const idx = callIdx++;
+        // idx 0: addEpisode initial GET → 404 (feed doesn't exist)
+        if (!init?.method && idx === 0) {
+          return new Response('', { status: 404 });
+        }
+        // idx 1: putWithRetry PUT (create) → 412 (conflict)
+        if (init?.method === 'PUT' && idx === 1) {
+          return new Response('', { status: 412 });
+        }
+        // idx 2: putWithRetry re-fetch GET → 200 with feed XML
+        if (!init?.method && idx === 2) {
           return new Response(
             '<?xml version="1.0"?><rss version="2.0"><channel></channel></rss>',
-            { status: 200, headers: { etag: '"a"' } }
+            { status: 200, headers: { etag: '"b"' } }
           );
         }
-        if (init.method === 'PUT') {
-          // Capture the XML body on the successful PUT
+        // idx 3: putWithRetry PUT (update) → 200 (success)
+        if (init?.method === 'PUT') {
+          capturedXml = (init.body as string) ?? null;
           return new Response('', { status: 200 });
         }
-        return new Response('', { status: 412 });
+        return new Response('', { status: 200 });
       };
       const backend = new RssFeedBackend(podcastMetadata, null, 'https://example.com/feed.xml');
       await backend.addEpisode('https://example.com/feed.xml', episodeMetadata, mediaAsset);
-      expect(true).toBe(true); // If we reach here without error, the retry preserved the episode
+      // Verify the PUT body contains the episode title and guid
+      expect(capturedXml).toContain('Episode 1');
+      expect(capturedXml).toContain('ep-001');
     });
 
     it('throws rss_fetch_failed on HTTP 500 on GET', async () => {

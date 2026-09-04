@@ -162,7 +162,90 @@ Claude will call the tool and return the output path when done.
 | `OUTPUT_DIR` | | `/output` | Directory where MP3 files are written |
 | `TEMP_DIR` | | `/tmp/podcast-gen` | Temporary processing directory |
 | `PORT` | | `3000` | HTTP server port |
-| `PUBLIC_URL` | | `http://localhost:3000` | Base URL used to construct download links returned by the tool. Set this to your public hostname when running behind a reverse proxy or on a remote server. |
+| `PUBLIC_URL` | | `http://localhost:3000` | Base URL for download links. For RSS-only mode this **must** be a public HTTP(S) hostname — localhost, 127.0.0.0/8, ::1, fe80::*, and 0.0.0.0 are rejected. |
+| `S3_ENDPOINT` | | — | S3-compatible endpoint URL (e.g. `https://s3.amazonaws.com`). All 5 S3 vars must be set together. |
+| `S3_REGION` | | `us-east-1` | AWS region. For Cloudflare R2, set to `auto` — R2 is regionless. |
+| `S3_ACCESS_KEY_ID` | | — | S3 access key |
+| `S3_SECRET_ACCESS_KEY` | | — | S3 secret key |
+| `S3_BUCKET` | | — | S3 bucket name |
+| `S3_PUBLIC_URL` | | — | Public CDN URL for uploaded files |
+| `S3_FORCE_PATH_STYLE` | | `false` | Force path-style URLs. Set to `true` for Cloudflare R2 and MinIO. |
+**Cloudflare R2 note:** Replace `<account-id>` in your endpoint with your Cloudflare account ID (found in the dashboard URL). Create an R2 API token with "R2 Objects Read & Write" scope. Set `S3_FORCE_PATH_STYLE=true` — required for R2 since it uses path-style URLs.
+
+| `RSS_FEED_URL` | | — | RSS feed URL to update |
+| `PODCAST_TITLE` | | — | Podcast title |
+| `PODCAST_DESCRIPTION` | | — | Podcast description |
+| `PODCAST_LINK` | | — | Podcast website |
+| `PODCAST_AUTHOR` | | — | Podcast author |
+| `PODCAST_LANGUAGE` | | `en-us` | Podcast language |
+| `PODCAST_CATEGORIES` | | `Technology` | Comma-separated categories |
+
+## Architecture
+
+This server supports two optional backends:
+
+- **S3-compatible storage** — uploads generated MP3s to an S3 bucket or MinIO instance. Uses a `Buffer` (not streams) to avoid AWS SDK v3 retry hangs ([#5479](https://github.com/aws/aws-sdk-js-v3/issues/5479)).
+- **RSS feed backend** — maintains an RSS 2.0 feed with iTunes podcast extensions. Uses `xml2js` for XML parsing/building. Supports concurrent PUT with ETag/If-Match retry (412 → re-fetch → re-merge → PUT).
+
+Both backends are abstracted behind `StorageBackend` and `FeedBackend` interfaces so future providers can be added without changing the publish handler.
+
+## Dependencies
+
+| Package | Purpose |
+|---|---|
+| `@aws-sdk/client-s3` | S3-compatible storage client |
+| `xml2js` | RSS feed XML parsing and building |
+| `@types/xml2js` | TypeScript types for xml2js |
+
+## Tool: `publish_podcast`
+
+Publish a generated podcast MP3 to S3 storage and/or update the RSS feed.
+
+### Input
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `outputFilename` | string | ✅ | MP3 filename (must be `.mp3`) |
+| `episodeTitle` | string | ✅ | Episode title (1–250 chars) |
+| `episodeDescription` | string | ✅ | Episode description (1–5000 chars) |
+| `episodeGuid` | string | | Unique identifier; defaults to filename |
+| `episodePublishedAt` | string | | RFC 3339 datetime; defaults to now |
+| `episodeNumber` | number | | Episode number |
+| `episodeSeason` | number | | Season number |
+
+### Output
+
+```typescript
+{
+  success: boolean;
+  stages: {
+    s3: { status: 'succeeded' | 'failed' | 'skipped'; errorCode?: string; s3Url?: string };
+    rss: { status: 'succeeded' | 'failed' | 'skipped'; errorCode?: string; feedUrl?: string };
+  };
+  fileSizeBytes?: number;
+  durationSeconds?: number;
+  errorCode?: string;
+  probeStatFailed?: boolean;
+  probeFFprobeFailed?: boolean;
+}
+```
+
+### Concurrency model
+
+RSS feed updates use ETag-based concurrency control with S3 `IfMatch`/`IfNoneMatch` headers (or HTTP `If-Match`/`If-None-Match` for RSS-only mode):
+- Create (no existing feed): PUT with `If-None-Match: *`
+- Update (feed exists): PUT with `If-Match: <etag>`
+- `412 Precondition Failed` or `409 Conflict` → re-fetch feed, re-merge episode, re-PUT with new ETag
+- Max 3 PUT attempts before failing with `rss_update_failed` or `rss_create_failed`
+
+### Limitations
+
+- **RSS authentication** — Basic auth / API keys for feed URLs are not supported. Feed URLs must be publicly accessible.
+- **S3 public-read** — The bucket (or CDN) must allow public read for enclosure URLs to work.
+- **ETag precision** — If the feed server returns imprecise or missing ETags, concurrency falls back to last-write-wins.
+- **RSS-only** — When S3 is not configured, `PUBLIC_URL` is required and must be a public HTTP(S) URL (no loopback/localhost ranges).
+- **File size** — Files over 500 MB are rejected. The entire file is read into a Buffer for upload (to avoid stream retry issues).
+- **No streaming** — Large files are buffered in memory. For very large files consider increasing heap (`--max-old-space-size`).
 
 ## MCP Endpoint
 
@@ -341,6 +424,44 @@ EBU R128 Normalization (two-pass, target: -16 LUFS)
           ▼
      /output/episode.mp3
 ```
+
+## S3 Upload & RSS Publishing
+
+Optionally configure S3 storage and RSS feed publishing by setting environment variables.
+
+### S3 Storage
+
+Upload generated MP3s to an S3-compatible bucket:
+
+```bash
+export S3_ENDPOINT=https://s3.amazonaws.com
+export S3_ACCESS_KEY_ID=...
+export S3_SECRET_ACCESS_KEY=...
+export S3_BUCKET=my-podcasts
+export S3_PUBLIC_URL=https://cdn.example.com
+```
+
+All five variables must be set together — omit all to disable.
+
+### RSS Feed
+
+Maintain an RSS 2.0 feed that the `publish_podcast` tool updates on each call:
+
+```bash
+export RSS_FEED_URL=https://cdn.example.com/podcast.xml
+export PODCAST_TITLE=My Podcast
+export PODCAST_DESCRIPTION=A podcast about engineering
+export PODCAST_LINK=https://example.com
+export PODCAST_AUTHOR=Jane Doe
+```
+
+Omit all to disable RSS. `PODCAST_LANGUAGE` defaults to `en-us`; `PODCAST_CATEGORIES` defaults to `Technology`.
+
+**RSS-only mode** (S3 not configured): `PUBLIC_URL` must be set and must resolve to a public HTTP(S) hostname — `localhost`, `127.*`, `::1`, `fe80::*`, and `0.0.0.0` are rejected. Malformed or non-HTTP(S) URLs also fail.
+
+### Publish Tool
+
+The `publish_podcast` MCP tool reads an existing MP3, uploads it to S3 (if configured), and appends an episode entry to the RSS feed (if configured). It validates the output file, probes duration with `ffprobe`, and returns structured per-stage results.
 
 ## Using with an MCP Client
 

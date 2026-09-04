@@ -251,4 +251,92 @@ describe('S3StorageBackend', () => {
       expect(result.config!.forcePathStyle).toBe(false);
     });
   });
+
+  describe('conditional writes (IfMatch/IfNoneMatch)', () => {
+    it('sends IfNoneMatch: * on create (isCreate=true, no etag)', async () => {
+      delete process.env.S3_REGION;
+      delete process.env.S3_FORCE_PATH_STYLE;
+      delete process.env.S3_FEED_BUCKET;
+
+      process.env.S3_ENDPOINT = 'https://s3.example.com';
+      process.env.S3_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';
+      process.env.S3_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+      process.env.S3_BUCKET = 'my-bucket';
+      process.env.S3_PUBLIC_URL = 'https://cdn.example.com';
+
+      const config = validateS3Config();
+      const s3Backend = new S3StorageBackend(config.config!);
+      await s3Backend.putString('feeds/podcast.xml', '<xml/>', 'application/xml', undefined, true);
+
+      const sc = getSentCommands() as unknown[];
+      const input = sc[0] as Record<string, unknown>;
+      expect(input.IfNoneMatch).toBe('*');
+      expect(input.IfMatch).toBeUndefined();
+    });
+
+    it('sends IfMatch on update (isCreate=false, etag present)', async () => {
+      delete process.env.S3_REGION;
+      delete process.env.S3_FORCE_PATH_STYLE;
+      delete process.env.S3_FEED_BUCKET;
+
+      process.env.S3_ENDPOINT = 'https://s3.example.com';
+      process.env.S3_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';
+      process.env.S3_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+      process.env.S3_BUCKET = 'my-bucket';
+      process.env.S3_PUBLIC_URL = 'https://cdn.example.com';
+
+      const config = validateS3Config();
+      const s3Backend = new S3StorageBackend(config.config!);
+      await s3Backend.putString('feeds/podcast.xml', '<xml/>', 'application/xml', '"abc123"', false);
+
+      const sc = getSentCommands() as unknown[];
+      const input = sc[0] as Record<string, unknown>;
+      expect(input.IfMatch).toBe('"abc123"');
+      expect(input.IfNoneMatch).toBeUndefined();
+    });
+
+    it('sends IfNoneMatch: * when isCreate is true regardless of etag', async () => {
+      delete process.env.S3_REGION;
+      delete process.env.S3_FORCE_PATH_STYLE;
+      delete process.env.S3_FEED_BUCKET;
+
+      process.env.S3_ENDPOINT = 'https://s3.example.com';
+      process.env.S3_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';
+      process.env.S3_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+      process.env.S3_BUCKET = 'my-bucket';
+      process.env.S3_PUBLIC_URL = 'https://cdn.example.com';
+
+      const config = validateS3Config();
+      const s3Backend = new S3StorageBackend(config.config!);
+      // isCreate=true always sets IfNoneMatch regardless of etag
+      await s3Backend.putString('feeds/podcast.xml', '<xml/>', 'application/xml', '"existing"', true);
+
+      const sc = getSentCommands() as unknown[];
+      const input = sc[0] as Record<string, unknown>;
+      expect(input.IfNoneMatch).toBe('*');
+      expect(input.IfMatch).toBeUndefined();
+    });
+
+    it('sends no conditional header when isCreate is false and etag is absent', async () => {
+      delete process.env.S3_REGION;
+      delete process.env.S3_FORCE_PATH_STYLE;
+      delete process.env.S3_FEED_BUCKET;
+
+      process.env.S3_ENDPOINT = 'https://s3.example.com';
+      process.env.S3_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';
+      process.env.S3_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+      process.env.S3_BUCKET = 'my-bucket';
+      process.env.S3_PUBLIC_URL = 'https://cdn.example.com';
+
+      const config = validateS3Config();
+      const s3Backend = new S3StorageBackend(config.config!);
+      // isCreate=false and no etag — neither header should be sent
+      await s3Backend.putString('feeds/podcast.xml', '<xml/>', 'application/xml', undefined, false);
+
+      const sc = getSentCommands() as unknown[];
+      const input = sc[0] as Record<string, unknown>;
+      expect(input.IfNoneMatch).toBeUndefined();
+      expect(input.IfMatch).toBeUndefined();
+    });
+  });
 });

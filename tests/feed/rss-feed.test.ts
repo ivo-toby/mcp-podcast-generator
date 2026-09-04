@@ -273,17 +273,75 @@ describe('RssFeedBackend', () => {
 </rss>`;
 
     it('re-fetches on 412 and retries PUT', async () => {
-      enqueueResults(
-        { status: 'ok', xml: existingFeedXml, etag: '"abc"' },
-        { putError: new FeedError('rss_update_failed', 'Precondition Failed') },
-        { status: 'ok', xml: existingFeedXml, etag: '"def"' },
-        { status: 'ok' }
-      );
+      let etagIndex = 0;
+      const etags = ['"abc"', '"def"'];
+      // Override mock to simulate S3 412 via $metadata
+      const mockQueue412: MockS3Result[] = [];
+      let captured412Xml: string | null = null;
+      const mockStorage = {
+        get getString() {
+          return async (key: string) => {
+            const result = mockQueue412.shift() ?? { status: 'ok', xml: '', etag: '"default"' };
+            if (result.status === 'not-found') {
+              const err = new Error('Not Found') as Error & { name: string; code: string };
+              err.name = 'NoSuchKey';
+              err.code = 'NoSuchKey';
+              throw err;
+            }
+            return { Body: createMockBody(result.xml ?? ''), ETag: result.etag };
+          };
+        },
+        get client() {
+          return {
+            send: async (command: any) => {
+              const action = command.constructor.name;
+              if (action === 'GetObjectCommand') {
+                const result = mockQueue.shift() ?? { status: 'ok', xml: '', etag: '"default"' };
+                if (result.status === 'not-found') {
+                  const err = new Error('Not Found') as Error & { name: string; code: string };
+                  err.name = 'NoSuchKey';
+                  err.code = 'NoSuchKey';
+                  throw err;
+                }
+                return { Body: createMockBody(result.xml ?? ''), ETag: result.etag };
+              }
+              // PutObjectCommand
+              if (command.input?.IfMatch === '"abc"') {
+                // First PUT with IfMatch: returns 412
+                const err = new Error('Precondition Failed') as Error & { name: string; $metadata: { httpStatusCode: number } };
+                err.name = 'PreconditionFailed';
+                (err as any).$metadata = { httpStatusCode: 412 };
+                throw err;
+              }
+              // Second PUT succeeds — capture the body
+              captured412Xml = command.input?.Body;
+              return { ETag: '"def"' };
+            },
+          };
+        },
+        get config() {
+          return {
+            endpoint: 'https://r2.example.com',
+            region: 'auto',
+            accessKeyId: 'test-key',
+            secretAccessKey: 'test-secret',
+            bucket: 'test-bucket',
+            publicUrl: 'https://pub.example.com',
+            forcePathStyle: true,
+          };
+        },
+        putString: async (key: string, body: string, contentType: string, etag?: string, isCreate?: boolean) => {
+          return mockStorage.client.send({ input: { Bucket: mockStorage.config.bucket, Key: key, Body: body, ContentType: contentType } });
+        },
+      } as unknown as S3StorageBackend;
 
-      const mockStorage = createMockStorageBackend();
+      mockQueue412.push(
+        { status: 'ok', xml: existingFeedXml, etag: '"abc"' },
+        { status: 'ok', xml: existingFeedXml, etag: '"abc"' }
+      );
       const backend = new RssFeedBackend(podcastMetadata, mockStorage, 'https://pub.example.com/podcast.xml');
       await backend.addEpisode('https://pub.example.com/podcast.xml', episodeMetadata, mediaAsset);
-      expect(putXml).toContain('Episode 1');
+      expect(captured412Xml).toContain('Episode 1');
     });
 
     it('throws rss_update_failed after PUT failure', async () => {
@@ -345,33 +403,46 @@ describe('RssFeedBackend', () => {
   </channel>
 </rss>`;
 
-      enqueueResults(
-        { status: 'ok', xml: existingFeed, etag: '"abc"' },
-        { putError: new FeedError('rss_create_failed', 'Conflict') },
-        { status: 'ok', xml: existingFeed, etag: '"def"' },
-        { status: 'ok' }
-      );
-
-      const mockStorage = createMockStorageBackend();
-      const backend = new RssFeedBackend(podcastMetadata, mockStorage, 'https://pub.example.com/podcast.xml');
-      await backend.addEpisode('https://pub.example.com/podcast.xml', episodeMetadata, mediaAsset);
-      expect(putXml).toContain('Episode 1');
-    });
-  });
-
-  describe('S3 conditional writes', () => {
-    it('sends IfNoneMatch: * on create (no etag)', async () => {
-      let sentIfNoneMatch: string | undefined;
-      enqueueResults(
-        { status: 'not-found' }
-      );
-      // Override the mock to capture the command sent to S3
-      const mockStorage = {
+      // Override mock to simulate S3 409 via $metadata
+      const mockQueue409: MockS3Result[] = [];
+      let captured409Xml: string | null = null;
+      const mockStorage409 = {
+        get getString() {
+          return async (key: string) => {
+            const result = mockQueue409.shift() ?? { status: 'ok', xml: '', etag: '"default"' };
+            if (result.status === 'not-found') {
+              const err = new Error('Not Found') as Error & { name: string; code: string };
+              err.name = 'NoSuchKey';
+              err.code = 'NoSuchKey';
+              throw err;
+            }
+            return { Body: createMockBody(result.xml ?? ''), ETag: result.etag };
+          };
+        },
         get client() {
           return {
             send: async (command: any) => {
-              sentIfNoneMatch = command?.input?.IfNoneMatch;
-              return { ETag: '"new-etag"' };
+              const action = command.constructor.name;
+              if (action === 'GetObjectCommand') {
+                const result = mockQueue409.shift() ?? { status: 'ok', xml: '', etag: '"default"' };
+                if (result.status === 'not-found') {
+                  const err = new Error('Not Found') as Error & { name: string; code: string };
+                  err.name = 'NoSuchKey';
+                  err.code = 'NoSuchKey';
+                  throw err;
+                }
+                return { Body: createMockBody(result.xml ?? ''), ETag: result.etag };
+              }
+              // PutObjectCommand — first PUT returns 409, second returns 200
+              if (!('_putCount' in mockStorage409)) (mockStorage409 as any)._putCount = 0;
+              (mockStorage409 as any)._putCount++;
+              if ((mockStorage409 as any)._putCount === 1) {
+                const err = new Error('Conflict') as Error & { name: string; $metadata: { httpStatusCode: number } };
+                err.name = 'ConditionalRequestConflict';
+                (err as any).$metadata = { httpStatusCode: 409 };
+                throw err;
+              }
+              return { ETag: '"retry-etag"' };
             },
           };
         },
@@ -387,13 +458,69 @@ describe('RssFeedBackend', () => {
           };
         },
         putString: async (key: string, body: string, contentType: string, etag?: string, isCreate?: boolean) => {
-          return;
+          captured409Xml = body;
+          return mockStorage409.client.send({ input: { Bucket: mockStorage409.config.bucket, Key: key, Body: body, ContentType: contentType } });
+        },
+      } as unknown as S3StorageBackend;
+
+      mockQueue409.push(
+        { status: 'ok', xml: existingFeed, etag: '"abc"' },
+        { status: 'ok', xml: existingFeed, etag: '"abc"' }
+      );
+      const backend = new RssFeedBackend(podcastMetadata, mockStorage409, 'https://pub.example.com/podcast.xml');
+      await backend.addEpisode('https://pub.example.com/podcast.xml', episodeMetadata, mediaAsset);
+      expect(captured409Xml).toContain('Episode 1');
+    });
+  });
+
+  describe('S3 conditional writes', () => {
+    it('sends IfNoneMatch: * on create (no etag)', async () => {
+      let sentIfNoneMatch: string | undefined;
+      let sentIfMatch: string | undefined;
+      // Override the mock to capture the command sent to S3
+      const mockStorage = {
+        get client() {
+          return {
+            send: async (command: any) => {
+              sentIfNoneMatch = command?.input?.IfNoneMatch;
+              sentIfMatch = command?.input?.IfMatch;
+              return { ETag: '"new-etag"' };
+            },
+          };
+        },
+        get config() {
+          return {
+            endpoint: 'https://r2.example.com',
+            region: 'auto',
+            accessKeyId: 'test-key',
+            secretAccessKey: 'test-secret',
+            bucket: 'test-bucket',
+            publicUrl: 'https://pub.example.com',
+            forcePathStyle: true,
+          };
+        },
+        // Real putString implementation that delegates to client.send
+        putString: async (key: string, body: string, contentType: string, etag?: string, isCreate?: boolean) => {
+          const putParams: Record<string, string> = {
+            Bucket: mockStorage.config.bucket,
+            Key: key,
+            Body: body,
+            ContentType: contentType,
+          };
+          if (isCreate && !etag) {
+            putParams.IfNoneMatch = '*';
+          } else if (etag) {
+            putParams.IfMatch = etag;
+          }
+          await mockStorage.client.send({ input: putParams });
         },
       } as unknown as S3StorageBackend;
 
       const backend = new RssFeedBackend(podcastMetadata, mockStorage, 'https://pub.example.com/podcast.xml');
       await backend.addEpisode('https://pub.example.com/podcast.xml', episodeMetadata, mediaAsset);
+      // On create (no prior etag), IfNoneMatch should be *
       expect(sentIfNoneMatch).toBe('*');
+      expect(sentIfMatch).toBeUndefined();
     });
   });
 

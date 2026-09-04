@@ -111,17 +111,25 @@ if (rssFeedUrl) {
     }
   }
 
-  // Derive feed key from URL path (fallback to podcast.xml)
+  // Validate the feed URL before deriving its S3 key. `deriveFeedKey` uses
+  // `podcast.xml` for a valid root path, so that key cannot also represent an
+  // invalid URL.
+  try {
+    const parsed = new URL(rssFeedUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error('unsupported protocol');
+    }
+  } catch {
+    throw new Error(
+      'RSS feed URL is malformed — cannot derive S3 key from feed URL'
+    );
+  }
+
+  // Derive feed key from URL path (root path maps to podcast.xml)
   const feedKey = deriveFeedKey(rssFeedUrl, s3Config);
   if (s3Config && !feedKey) {
     throw new Error(
       'RSS feed URL does not match S3_PUBLIC_URL origin — feed must be stored inside the S3 bucket'
-    );
-  }
-  // In S3 mode or if the URL is malformed, a fallback to podcast.xml is unsafe
-  if (s3Config && feedKey === 'podcast.xml') {
-    throw new Error(
-      'RSS feed URL is malformed — cannot derive S3 key from feed URL'
     );
   }
 

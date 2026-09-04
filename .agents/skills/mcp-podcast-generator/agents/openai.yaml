@@ -1,0 +1,4 @@
+interface:
+  display_name: "MCP Podcast Generator"
+  short_description: "Generate and publish podcast episodes"
+  default_prompt: "Use $mcp-podcast-generator to create and, if requested, publish a podcast episode."

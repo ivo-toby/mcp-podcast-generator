@@ -2,13 +2,13 @@ services:
   mcp-podcast-generator:
     build: .
     ports:
-      - "3000:3000"
+      - "${PORT:-3000}:${PORT:-3000}"
     environment:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - OUTPUT_DIR=/output
       - TEMP_DIR=/tmp/podcast-gen
-      - PORT=3000
-      - PUBLIC_URL=${PUBLIC_URL:-http://localhost:3000}
+      - PORT=${PORT:-3000}
+      - PUBLIC_URL=${PUBLIC_URL:-http://localhost:${PORT:-3000}}
       # S3 (optional — uncomment all 5 required vars together)
       - S3_ENDPOINT=${S3_ENDPOINT}
       - S3_REGION=${S3_REGION:-us-east-1}

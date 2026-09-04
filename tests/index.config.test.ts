@@ -1,5 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { validateS3Config, FatalError } from '../src/storage/storage-types.js';
+import { deriveFeedKey } from '../src/utils/feed-utils.js';
+import type { S3Config } from '../src/storage/s3-storage.js';
 
 describe('Configuration validation', () => {
   const originalEnv = { ...process.env };
@@ -143,6 +145,53 @@ describe('Configuration validation', () => {
       process.env.S3_PUBLIC_URL = 'https://cdn.example.com/';
       const result = validateS3Config();
       expect(result.config!.publicUrl).toBe('https://cdn.example.com');
+    });
+  });
+
+  describe('deriveFeedKey', () => {
+    it('returns the full path when no S3 config (RSS-only)', () => {
+      const result = deriveFeedKey('https://example.com/feeds/show.xml', null);
+      expect(result).toBe('feeds/show.xml');
+    });
+
+    it('strips trailing slashes from feed URL', () => {
+      const result = deriveFeedKey('https://example.com/feeds/', null);
+      expect(result).toBe('feeds');
+    });
+
+    it('returns podcast.xml when feed URL path is empty', () => {
+      const result = deriveFeedKey('https://example.com/', null);
+      expect(result).toBe('podcast.xml');
+    });
+
+    it('returns empty string when origins do not match', () => {
+      const s3Config = { endpoint: 'https://s3.example.com', region: 'us-east-1', accessKeyId: 'key', secretAccessKey: 'secret', bucket: 'bucket', publicUrl: 'https://other.com', forcePathStyle: true } as S3Config;
+      const result = deriveFeedKey('https://example.com/feed.xml', s3Config);
+      expect(result).toBe('');
+    });
+
+    it('returns empty string for sibling-prefix paths (path-boundary check)', () => {
+      const s3Config = { endpoint: 'https://r2.example.com', region: 'auto', accessKeyId: 'key', secretAccessKey: 'secret', bucket: 'bucket', publicUrl: 'https://r2.example.com/base', forcePathStyle: true } as S3Config;
+      const result = deriveFeedKey('https://r2.example.com/baseball/feed.xml', s3Config);
+      expect(result).toBe('');
+    });
+
+    it('returns relative path for matching sibling paths', () => {
+      const s3Config = { endpoint: 'https://r2.example.com', region: 'auto', accessKeyId: 'key', secretAccessKey: 'secret', bucket: 'bucket', publicUrl: 'https://r2.example.com', forcePathStyle: true } as S3Config;
+      const result = deriveFeedKey('https://r2.example.com/feeds/show.xml', s3Config);
+      expect(result).toBe('feeds/show.xml');
+    });
+
+    it('strips trailing slashes from feed path', () => {
+      const s3Config = { endpoint: 'https://r2.example.com', region: 'auto', accessKeyId: 'key', secretAccessKey: 'secret', bucket: 'bucket', publicUrl: 'https://r2.example.com', forcePathStyle: true } as S3Config;
+      const result = deriveFeedKey('https://r2.example.com/feeds/', s3Config);
+      expect(result).toBe('feeds');
+    });
+
+    it('returns podcast.xml when relative path is empty', () => {
+      const s3Config = { endpoint: 'https://r2.example.com', region: 'auto', accessKeyId: 'key', secretAccessKey: 'secret', bucket: 'bucket', publicUrl: 'https://r2.example.com/', forcePathStyle: true } as S3Config;
+      const result = deriveFeedKey('https://r2.example.com/', s3Config);
+      expect(result).toBe('podcast.xml');
     });
   });
 });

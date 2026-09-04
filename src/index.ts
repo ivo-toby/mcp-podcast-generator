@@ -6,6 +6,7 @@ import { generatePodcast, GeneratePodcastInput } from './tools/generate-podcast.
 import { logger } from './utils/logger.js';
 import { validateS3Config, type S3Config } from './storage/storage-types.js';
 import { S3StorageBackend } from './storage/s3-storage.js';
+import { deriveFeedKey } from './utils/feed-utils.js';
 import { RssFeedBackend } from './feed/rss-feed.js';
 import {
   createPublishHandler,
@@ -117,6 +118,12 @@ if (rssFeedUrl) {
       'RSS feed URL does not match S3_PUBLIC_URL origin — feed must be stored inside the S3 bucket'
     );
   }
+  // In S3 mode or if the URL is malformed, a fallback to podcast.xml is unsafe
+  if (s3Config && feedKey === 'podcast.xml') {
+    throw new Error(
+      'RSS feed URL is malformed — cannot derive S3 key from feed URL'
+    );
+  }
 
   rssFeedBackend = new RssFeedBackend(
     {
@@ -145,38 +152,6 @@ if (rssFeedUrl) {
     publicUrl: config.publicUrl,
   };
   logger.info({ feedUrl: rssFeedUrl, feedKey }, 'RSS feed enabled');
-}
-
-/**
- * Derive an S3 key from an RSS feed URL.
- *
- * Strips the S3 public URL origin/path prefix from the feed URL to compute the relative path.
- * Returns an empty string if the feed URL origin does not match S3_PUBLIC_URL.
- */
-function deriveFeedKey(feedUrl: string, s3Config: S3Config | null): string {
-  try {
-    const feedU = new URL(feedUrl);
-    if (!s3Config) {
-      // RSS-only (no S3) — use the feed URL pathname directly
-      let path = feedU.pathname;
-      if (path.endsWith('/') && path !== '/') path = path.slice(0, -1);
-      return path || 'podcast.xml';
-    }
-    const pubU = new URL(s3Config.publicUrl.replace(/\/*$/, ''));
-    // Validate origin matches
-    if (feedU.origin !== pubU.origin) return '';
-    const pubPath = pubU.pathname.replace(/\/*$/, '');
-    const feedPath = feedU.pathname;
-    // Strip the public URL prefix to get the relative path
-    if (!feedPath.startsWith(pubPath)) return '';
-    let relative = feedPath.slice(pubPath.length);
-    // Remove leading slash
-    if (relative.startsWith('/')) relative = relative.slice(1);
-    relative = relative.replace(/\/*$/, '');
-    return relative || 'podcast.xml';
-  } catch {
-    return 'podcast.xml';
-  }
 }
 
 if (!config.googleApiKey) {

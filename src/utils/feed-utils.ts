@@ -1,4 +1,4 @@
-import type { S3Config } from '../storage/s3-storage.js';
+import type { S3Config } from '../storage/storage-types.js';
 
 /**
  * Derive an S3 key from an RSS feed URL.

@@ -2,6 +2,7 @@ import {
   S3Client,
   PutObjectCommand,
 } from '@aws-sdk/client-s3';
+import type { PutObjectCommandInput } from '@aws-sdk/client-s3';
 import { NodeHttpHandler } from '@aws-sdk/node-http-handler';
 import { readFile } from 'fs/promises';
 import type { S3Config, MediaAsset } from './storage-types.js';
@@ -81,18 +82,25 @@ export class S3StorageBackend {
    * Put a string (e.g. RSS XML) directly to S3.
    * Used for feed management.
    */
-  async putString(key: string, body: string, contentType: string): Promise<void> {
+  async putString(key: string, body: string, contentType: string, etag?: string, isCreate?: boolean): Promise<void> {
     const encodedSegments = key.split('/').map(encodeURIComponent);
     const url = `${this.config.publicUrl}/${encodedSegments.join('/')}`;
 
-    await this.client.send(
-      new PutObjectCommand({
-        Bucket: this.config.bucket,
-        Key: key,
-        Body: body,
-        ContentType: contentType,
-      })
-    );
+    const putParams: PutObjectCommandInput = {
+      Bucket: this.config.bucket,
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+    };
+
+    // IfMatch for updates, IfNoneMatch for creates
+    if (isCreate) {
+      putParams.IfNoneMatch = '*';
+    } else if (etag) {
+      putParams.IfMatch = etag;
+    }
+
+    await this.client.send(new PutObjectCommand(putParams));
 
     log.info({ key: this.config.bucket + '/' + key, url }, 'String uploaded');
   }

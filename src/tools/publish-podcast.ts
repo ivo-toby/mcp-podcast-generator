@@ -371,9 +371,11 @@ async function executePublish(
         rssResult = { status: 'succeeded', feedUrl: feedResult.feedUrl };
       } catch (err) {
         const feedErr = err as { code?: string; message?: string };
-        const errorCode = feedErr.code || 'rss_update_failed';
+        // Whitelist the four FeedErrorCode values; map everything else to rss_update_failed
+        const allowed = ['rss_fetch_failed', 'rss_create_failed', 'rss_update_failed', 'rss_duplicate_guid'];
+        const errorCode = feedErr.code && allowed.includes(feedErr.code) ? feedErr.code : 'rss_update_failed';
         const message = feedErr.message || String(err);
-        logger.error({ err }, '[publish_podcast] RSS update failed');
+        logger.error({ err }, '[publish_podcast] RSS stage failed');
         rssResult = { status: 'failed', errorCode, errorMessage: message };
       }
     }

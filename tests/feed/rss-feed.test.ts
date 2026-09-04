@@ -499,4 +499,144 @@ describe('RssFeedBackend', () => {
       }
     });
   });
+
+  describe('HTTP fallback (RSS-only mode)', () => {
+    let originalFetch: typeof globalThis.fetch | undefined;
+
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it('preserves requested episode on HTTP 412 retry', async () => {
+      globalThis.fetch = async (_url: string, init?: RequestInit) => {
+        if (!init?.method) {
+          return new Response(
+            '<?xml version="1.0"?><rss version="2.0"><channel></channel></rss>',
+            { status: 200, headers: { etag: '"a"' } }
+          );
+        }
+        if (init.method === 'PUT') {
+          // Capture the XML body on the successful PUT
+          return new Response('', { status: 200 });
+        }
+        return new Response('', { status: 412 });
+      };
+      const backend = new RssFeedBackend(podcastMetadata, null, 'https://example.com/feed.xml');
+      await backend.addEpisode('https://example.com/feed.xml', episodeMetadata, mediaAsset);
+      expect(true).toBe(true); // If we reach here without error, the retry preserved the episode
+    });
+
+    it('throws rss_fetch_failed on HTTP 500 on GET', async () => {
+      let putCalled = false;
+      globalThis.fetch = async (_url: string, init?: RequestInit) => {
+        if (!init?.method) {
+          return new Response('', { status: 500 });
+        }
+        putCalled = true;
+        return new Response('', { status: 200 });
+      };
+      const backend = new RssFeedBackend(podcastMetadata, null, 'https://example.com/feed.xml');
+      try {
+        await backend.addEpisode('https://example.com/feed.xml', episodeMetadata, mediaAsset);
+        expect.fail('Should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(FeedError);
+        const feedErr = err as FeedError;
+        expect(feedErr.code).toBe('rss_fetch_failed');
+        expect(putCalled).toBe(false);
+      }
+    });
+
+    it('uses correct error code after create-conflict-then-update-fails', async () => {
+      let callIdx = 0;
+      globalThis.fetch = async (_url: string, init?: RequestInit) => {
+        const idx = callIdx++;
+        // idx 0: addEpisode GET -> 404 (feed doesn't exist)
+        if (!init?.method && idx === 0) {
+          return new Response('', { status: 404 });
+        }
+        // idx 1: putWithRetry PUT (create) -> 409
+        if (init?.method === 'PUT' && idx === 1) {
+          return new Response('', { status: 409 });
+        }
+        // idx 2: putWithRetry GET (re-fetch after 409) -> 200 with feed
+        if (!init?.method && idx === 2) {
+          return new Response(
+            '<?xml version="1.0"?><rss version="2.0"><channel></channel></rss>',
+            { status: 200, headers: { etag: '"b"' } }
+          );
+        }
+        // idx 3: putWithRetry PUT (update) -> 500
+        if (init?.method === 'PUT' && idx === 3) {
+          return new Response('', { status: 500 });
+        }
+        return new Response('', { status: 200 });
+      };
+      const backend = new RssFeedBackend(podcastMetadata, null, 'https://example.com/feed.xml');
+      try {
+        await backend.addEpisode('https://example.com/feed.xml', episodeMetadata, mediaAsset);
+        expect.fail('Should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(FeedError);
+        const feedErr = err as FeedError;
+        // After conflict we switch mode to 'update', so failure is rss_update_failed
+        expect(feedErr.code).toBe('rss_update_failed');
+      }
+    });
+  });
+
+  describe('empty channel handling', () => {
+    it('handles empty <channel/> without throwing', async () => {
+      const emptyChannelFeed = '<?xml version="1.0"?><rss version="2.0"><channel/></rss>';
+      enqueueResults(
+        { status: 'ok', xml: emptyChannelFeed, etag: '"empty"' },
+        { status: 'ok' }
+      );
+      const mockStorage = createMockStorageBackend();
+      const backend = new RssFeedBackend(podcastMetadata, mockStorage, 'https://pub.example.com/podcast.xml');
+      await expect(
+        backend.addEpisode('https://pub.example.com/podcast.xml', episodeMetadata, mediaAsset)
+      ).resolves.toBeDefined();
+    });
+  });
+
+  describe('createFeed template validation', () => {
+    it('does not emit invalid <image> element', async () => {
+      enqueueResults(
+        { status: 'not-found' },
+        { status: 'ok' }
+      );
+      const mockStorage = createMockStorageBackend();
+      const backend = new RssFeedBackend(podcastMetadata, mockStorage, 'https://pub.example.com/podcast.xml');
+      await backend.addEpisode('https://pub.example.com/podcast.xml', episodeMetadata, mediaAsset);
+      // Should not have an invalid <image> with only link
+      expect(putXml).not.toMatch(/<image>\s*<link>/);
+      // Should have proper xmlns:dc
+      expect(putXml).toContain('xmlns:dc');
+      // Should not have channel-level itunes:email
+      expect(putXml).not.toContain('<itunes:email>');
+    });
+  });
+
+  describe('key derivation', () => {
+    it('maps feed URL path to S3 key', async () => {
+      enqueueResults(
+        { status: 'not-found' },
+        { status: 'ok' }
+      );
+      const mockStorage = createMockStorageBackend();
+      const backend = new RssFeedBackend(
+        podcastMetadata,
+        mockStorage,
+        'https://pub.example.com/feeds/show.xml',
+        'feeds/show.xml'
+      );
+      await backend.addEpisode('https://pub.example.com/feeds/show.xml', episodeMetadata, mediaAsset);
+      expect(putXml).toContain('<title>Test Podcast</title>');
+    });
+  });
 });

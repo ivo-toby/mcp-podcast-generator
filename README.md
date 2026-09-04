@@ -232,10 +232,11 @@ Publish a generated podcast MP3 to S3 storage and/or update the RSS feed.
 
 ### Concurrency model
 
-RSS PUT uses ETag-based concurrency control:
-- `412 Precondition Failed` → re-fetch feed, re-merge episode, PUT with new `If-Match`
-- `409 Conflict` → re-fetch (GET). If 200 → update mode; if 404 → create mode with `If-None-Match: *`
-- Max 3 PUT attempts before failing
+RSS feed updates use ETag-based concurrency control with S3 `IfMatch`/`IfNoneMatch` headers (or HTTP `If-Match`/`If-None-Match` for RSS-only mode):
+- Create (no existing feed): PUT with `If-None-Match: *`
+- Update (feed exists): PUT with `If-Match: <etag>`
+- `412 Precondition Failed` or `409 Conflict` → re-fetch feed, re-merge episode, re-PUT with new ETag
+- Max 3 PUT attempts before failing with `rss_update_failed` or `rss_create_failed`
 
 ### Limitations
 

@@ -17,12 +17,15 @@ const log = childLogger('s3-storage');
  * because streams cannot be rewound.
  */
 export class S3StorageBackend {
-  private client: S3Client;
-  private config: S3Config;
+  private _client: S3Client;
+  private _config: S3Config;
+
+  public get client(): S3Client { return this._client; }
+  public get config(): S3Config { return this._config; }
 
   constructor(config: S3Config) {
-    this.config = config;
-    this.client = new S3Client({
+    this._config = config;
+    this._client = new S3Client({
       endpoint: config.endpoint,
       region: config.region ?? 'us-east-1',
       credentials: {
@@ -72,5 +75,25 @@ export class S3StorageBackend {
       lengthBytes: buffer.byteLength,
       mimeType: contentType,
     };
+  }
+
+  /**
+   * Put a string (e.g. RSS XML) directly to S3.
+   * Used for feed management.
+   */
+  async putString(key: string, body: string, contentType: string): Promise<void> {
+    const encodedSegments = key.split('/').map(encodeURIComponent);
+    const url = `${this.config.publicUrl}/${encodedSegments.join('/')}`;
+
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.config.bucket,
+        Key: key,
+        Body: body,
+        ContentType: contentType,
+      })
+    );
+
+    log.info({ key: this.config.bucket + '/' + key, url }, 'String uploaded');
   }
 }

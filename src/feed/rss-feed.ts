@@ -2,6 +2,7 @@ import {
   Builder,
   parseStringPromise,
 } from 'xml2js';
+import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import type {
   FeedBackend,
   FeedErrorCode,
@@ -9,9 +10,8 @@ import type {
   PodcastMetadata,
   FeedResult,
 } from './feed-types.js';
-const MAX_RETRY_COUNT = 3;
-const RETRY_BACKOFF_MS = [100, 300]; // 2 retries: attempt 0→1 = 100ms, attempt 1→2 = 300ms
-const FETCH_TIMEOUT_MS = 10_000;
+import type { S3StorageBackend } from '../storage/s3-storage.js';
+const MAX_FEED_XML_SIZE = 2 * 1024 * 1024; // 2 MB
 
 /**
  * Shared xml2js builder options.
@@ -31,16 +31,27 @@ const BUILDER_OPTS = {
  * xml2js 0.6 ignores whitelist/maxDepth — we validate input size instead.
  */
 const PARSER_OPTS: import('xml2js').ParserOptions = {};
-const MAX_FEED_XML_SIZE = 2 * 1024 * 1024; // 2 MB
 
 /**
  * RSS feed backend using xml2js for parsing and building XML.
+ * Uses the S3 storage backend for feed read/write operations.
  */
 export class RssFeedBackend implements FeedBackend {
   private podcast: PodcastMetadata;
+  private s3Storage: S3StorageBackend;
+  private feedKey: string; // e.g. 'podcast.xml'
+  private feedUrl: string; // public URL for enclosure links
 
-  constructor(podcast: PodcastMetadata) {
+  constructor(
+    podcast: PodcastMetadata,
+    s3Storage: S3StorageBackend,
+    feedUrl: string,
+    feedKey: string = 'podcast.xml'
+  ) {
     this.podcast = podcast;
+    this.s3Storage = s3Storage;
+    this.feedUrl = feedUrl;
+    this.feedKey = feedKey;
   }
 
   async addEpisode(
@@ -48,149 +59,101 @@ export class RssFeedBackend implements FeedBackend {
     episode: EpisodeMetadata,
     media: { url: string; lengthBytes: number; mimeType: string }
   ): Promise<FeedResult> {
-    let fetchRes: Response;
+    let existingXml: string | null = null;
+
+    // Fetch existing feed via S3
     try {
-      fetchRes = await fetch(feedUrl, {
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      });
-    } catch (err) {
-      throw new FeedError('rss_fetch_failed', `network error: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    if (fetchRes.status === 404) {
-      // Feed doesn't exist — create it
-      let xml: string;
-      try {
-        xml = this.createFeed(episode, media);
-      } catch (err) {
-        throw new FeedError('rss_create_failed', `serialization error: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      await this.putWithRetry(feedUrl, xml, undefined, true, episode, media);
-      return { feedUrl, episodeGuid: episode.guid };
-    }
-
-    if (fetchRes.status === 200) {
-      let existingXml: string;
-      try {
-        const body = await fetchRes.text();
+      const getRes = await this.s3Storage.client.send(new GetObjectCommand({
+        Bucket: this.s3Storage.config.bucket,
+        Key: this.feedKey,
+      }));
+      if (getRes.Body) {
+        const chunks: Buffer[] = [];
+        for await (const chunk of getRes.Body as AsyncIterable<Buffer>) {
+          chunks.push(chunk);
+        }
+        const body = Buffer.concat(chunks).toString('utf8');
         if (new TextEncoder().encode(body).length > MAX_FEED_XML_SIZE) {
           throw new FeedError('rss_fetch_failed', 'feed exceeds maximum size');
         }
         existingXml = body;
-      } catch (err) {
-        throw new FeedError('rss_fetch_failed', `body read error: ${err instanceof Error ? err.message : String(err)}`);
       }
-      const etag = fetchRes.headers.get('etag') ?? undefined;
-
-      const xml = await this.updateFeed(existingXml, episode, media);
-      await this.putWithRetry(feedUrl, xml, etag, false, episode, media);
-      return { feedUrl, episodeGuid: episode.guid };
+    } catch (err: unknown) {
+      const errName = (err as { name?: string }).name;
+      const errCode = (err as { code?: string }).code;
+      if (errName !== 'NoSuchKey' && errCode !== 'NoSuchKey' && errName !== 'NotFound' && errCode !== 'NotFound') {
+        throw new FeedError('rss_fetch_failed', `GET error: ${(err as Error).message}`);
+      }
     }
 
-    throw new FeedError('rss_fetch_failed', `unexpected status ${fetchRes.status}`);
+    let xml: string;
+    if (existingXml) {
+      xml = await this.updateFeed(existingXml, episode, media);
+    } else {
+      xml = this.createFeed(episode, media);
+    }
+
+    await this.s3Storage.putString(this.feedKey, xml, 'application/rss+xml');
+
+    return { feedUrl, episodeGuid: episode.guid };
   }
 
   /**
    * Build a brand-new RSS feed from podcast metadata + one episode.
    */
   createFeed(episode: EpisodeMetadata, media: { url: string; lengthBytes: number; mimeType: string }): string {
-    const now = toRFC822(new Date());
-    const currentYear = new Date().getFullYear();
-
-    const rss: Record<string, unknown> = {
+    const rss = {
       rss: {
-        $: {
-          version: '2.0',
-          'xmlns:itunes': 'http://www.itunes.com/dtds/podcast-1.0.dtd',
-          'xmlns:dc': 'http://purl.org/dc/elements/1.1/',
-          'xmlns:content': 'http://purl.org/rss/1.0/modules/content/',
+        $: { version: '2.0', 'xmlns:itunes': 'http://www.itunes.com/dtds/podcast-1.0.dtd', 'xmlns:content': 'http://purl.org/rss/1.0/modules/content/' },
+        channel: {
+          title: this.podcast.title,
+          link: this.podcast.link,
+          description: this.podcast.description,
+          language: this.podcast.language,
+          generator: 'mcp-podcast-generator',
+          'itunes:author': this.podcast.author,
+          'itunes:explicit': 'false',
+          'itunes:type': 'episodic',
+          'itunes:email': this.podcast.author,
+          image: { link: this.podcast.link },
+          'itunes:subtitle': truncateAtWord(this.podcast.description, 4000, true),
+          item: this.buildItem(episode, media),
+          'itunes:category': this.podcast.categories.map((c) => ({ $: { text: c } })),
         },
-        channel: [
-          {
-            title: this.podcast.title,
-            link: this.podcast.link,
-            description: this.podcast.description,
-            language: this.podcast.language,
-            copyright: `Copyright ${currentYear} ${this.podcast.author}`,
-            managingEditor: this.podcast.author,
-            webMaster: this.podcast.author,
-            lastBuildDate: now,
-            pubDate: now,
-            ttl: '60',
-            'dc:creator': this.podcast.author,
-            category: this.podcast.categories,
-            'itunes:author': this.podcast.author,
-            'itunes:owner': {
-              name: this.podcast.author,
-            },
-            'itunes:type': 'episodic',
-            item: [
-              this.buildItem(episode, media),
-            ],
-          },
-        ],
       },
     };
-
-    let xml: string;
-    try {
-      xml = new Builder(BUILDER_OPTS).buildObject(rss) as string;
-    } catch (err) {
-      throw new FeedError('rss_create_failed', `build error: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    return xml;
+    return new Builder(BUILDER_OPTS).buildObject(rss);
   }
 
   /**
-   * Parse existing XML, check for duplicate GUID, append a new episode.
-   *
-   * Returns the serialized XML string.
+   * Update an existing feed by appending an episode item.
    */
-  async updateFeed(
-    existingXml: string,
-    episode: EpisodeMetadata,
-    media: { url: string; lengthBytes: number; mimeType: string }
-  ): Promise<string> {
-    let parsed: any;
-    try {
-      parsed = await parseStringPromise(existingXml, PARSER_OPTS as any);
-    } catch {
-      throw new FeedError('rss_update_failed', 'parse error');
-    }
-
-    const channel = parsed?.rss?.channel?.[0];
-    if (!channel) {
-      throw new FeedError('rss_update_failed', 'no channel');
-    }
-
-    // Ensure items array exists (xml2js omits key when no <item> exists)
-    channel.item = channel.item ?? [];
-
-    // Check for duplicate GUID
-    for (const item of channel.item) {
+  async updateFeed(existingXml: string, episode: EpisodeMetadata, media: { url: string; lengthBytes: number; mimeType: string }): Promise<string> {
+    const parsed = await parseStringPromise(existingXml, PARSER_OPTS);
+    
+    // Get the first channel and its first item
+    const channel = Array.isArray(parsed.rss.channel) ? parsed.rss.channel[0] : parsed.rss.channel;
+    const items = Array.isArray(channel?.item) ? channel.item : (channel?.item ? [channel.item] : []);
+    
+    // Check for duplicate GUID across all items
+    for (const item of items) {
       const guid = extractGuid(item);
-      if (guid === episode.guid) {
-        throw new FeedError('rss_duplicate_guid', 'duplicate GUID found');
+      if (guid && guid === episode.guid) {
+        throw new FeedError('rss_duplicate_guid', `guid "${episode.guid}" already exists in feed`);
       }
     }
-
-    // Append new item
-    channel.item.push(this.buildItem(episode, media));
-
-    // Namespace repair — ensure xmlns declarations are present on the actual root
-    parsed.rss.$ ??= {};
-    const ns = parsed.rss.$;
-    if (!ns['xmlns:itunes']) ns['xmlns:itunes'] = 'http://www.itunes.com/dtds/podcast-1.0.dtd';
-    if (!ns['xmlns:dc']) ns['xmlns:dc'] = 'http://purl.org/dc/elements/1.1/';
-    if (!ns['xmlns:content']) ns['xmlns:content'] = 'http://purl.org/rss/1.0/modules/content/';
-
-    let xml: string;
-    try {
-      xml = new Builder(BUILDER_OPTS).buildObject(parsed) as string;
-    } catch (err) {
-      throw new FeedError('rss_update_failed', `build error: ${err instanceof Error ? err.message : String(err)}`);
+    
+    const newItem = this.buildItem(episode, media);
+    
+    if (Array.isArray(channel?.item)) {
+      channel.item = [...channel.item, newItem];
+    } else if (channel?.item) {
+      channel.item = [channel.item, newItem];
+    } else {
+      channel.item = [newItem];
     }
-    return xml;
+    
+    return new Builder(BUILDER_OPTS).buildObject(parsed);
   }
 
   /**
@@ -236,130 +199,6 @@ export class RssFeedBackend implements FeedBackend {
 
     return item;
   }
-
-  /**
-   * PUT with ETag retry loop for concurrency safety.
-   *
-   * Up to 3 total PUT attempts (2 retries) with exponential backoff.
-   * On 412/409, re-fetch the feed and retry the merge.
-   */
-  private async putWithRetry(
-    feedUrl: string,
-    xml: string,
-    etag: string | undefined,
-    isCreate: boolean,
-    _episode: EpisodeMetadata,
-    _media: { url: string; lengthBytes: number; mimeType: string }
-  ): Promise<void> {
-    let mode: 'create' | 'update' = isCreate ? 'create' : 'update';
-    let currentEtag: string | undefined = etag;
-    let currentXml: string | undefined = xml; // mutable — updated on 409/412 re-merge
-
-    for (let attempt = 0; attempt < MAX_RETRY_COUNT; attempt++) {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/rss+xml',
-      };
-
-      // Only send If-None-Match in create mode.
-      // In update mode without ETag: unconditional PUT (last-write-wins).
-      if (mode === 'create' && !currentEtag) {
-        headers['If-None-Match'] = '*';
-      } else if (mode === 'update' && currentEtag) {
-        headers['If-Match'] = currentEtag;
-      }
-      // else: update mode without ETag → no precondition header (last-write-wins)
-
-      let fetchRes: Response;
-      try {
-        fetchRes = await fetch(feedUrl, {
-          method: 'PUT',
-          headers,
-          body: currentXml ?? xml,
-          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        });
-      } catch (err) {
-        const modeCode = mode === 'create' ? 'rss_create_failed' : 'rss_update_failed';
-        throw new FeedError(modeCode, `network error: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      if (fetchRes.status >= 200 && fetchRes.status < 300) {
-        // Success
-        return;
-      }
-
-      if (fetchRes.status === 404) {
-        // Feed disappeared between GET and PUT — always fail.
-        // Only a 404 from the conflict re-fetch is handled below.
-        const modeCode = mode === 'create' ? 'rss_create_failed' : 'rss_update_failed';
-        throw new FeedError(modeCode, 'feed not found');
-      }
-
-      if (fetchRes.status === 412 || fetchRes.status === 409) {
-        // Concurrency conflict — re-fetch and retry.
-        // On the final attempt, throw immediately (no retry remaining).
-        if (attempt === MAX_RETRY_COUNT - 1) {
-          const modeCode = mode === 'create' ? 'rss_create_failed' : 'rss_update_failed';
-          throw new FeedError(modeCode, `conflict: ${fetchRes.status}`);
-        }
-        let getRes: Response;
-        try {
-          getRes = await fetch(feedUrl, {
-            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-          });
-        } catch (err) {
-          throw new FeedError('rss_fetch_failed', `network error during re-fetch: ${err instanceof Error ? err.message : String(err)}`);
-        }
-
-        if (getRes.status === 200) {
-          let existingXml: string;
-          try {
-            const body = await getRes.text();
-            if (new TextEncoder().encode(body).length > MAX_FEED_XML_SIZE) {
-              throw new FeedError('rss_fetch_failed', 'feed exceeds maximum size');
-            }
-            existingXml = body;
-          } catch (err) {
-            throw new FeedError('rss_fetch_failed', `body read error: ${err instanceof Error ? err.message : String(err)}`);
-          }
-          currentEtag = getRes.headers.get('etag') ?? undefined;
-          let mergedXml: string;
-          try {
-            mergedXml = await this.updateFeed(existingXml, _episode, _media);
-          } catch (err) {
-            // Preserve FeedError codes (e.g., rss_duplicate_guid) rather than masking them.
-            if (err instanceof FeedError) throw err;
-            throw new FeedError('rss_update_failed', `merge error: ${err instanceof Error ? err.message : String(err)}`);
-          }
-          currentXml = mergedXml;
-          mode = 'update';
-          // Continue the loop to retry the PUT
-          await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS[attempt]));
-          continue;
-        }
-
-        if (getRes.status === 404) {
-          // Feed was deleted during retry
-          if (mode === 'update') {
-            throw new FeedError('rss_update_failed', 'feed deleted during update');
-          }
-          // Create mode — feed still doesn't exist, continue retry loop
-          await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS[attempt]));
-          continue;
-        }
-
-        // Other status on GET (500, etc.) — no valid feed to retry with
-        throw new FeedError('rss_fetch_failed', `GET returned ${getRes.status}`);
-      }
-
-      // Other error status — give up
-      const modeCode = mode === 'create' ? 'rss_create_failed' : 'rss_update_failed';
-      throw new FeedError(modeCode, `PUT returned ${fetchRes.status}`);
-    }
-
-    // All retries exhausted — no further PUTs allowed.
-    const finalCode = mode === 'create' ? 'rss_create_failed' : 'rss_update_failed';
-    throw new FeedError(finalCode, 'max retries exceeded');
-  }
 }
 
 /**
@@ -369,71 +208,62 @@ export class FeedError extends Error {
   readonly code: FeedErrorCode;
 
   constructor(code: FeedErrorCode, detail?: string) {
-    super(detail ? `${code}: ${detail}` : code);
+    super(detail ?? code);
     this.name = 'FeedError';
     this.code = code;
   }
 }
 
-/**
- * Extract the GUID text value from an xml2js-parsed <guid> node.
- *
- * Handles both plain text GUIDs (`<guid>value</guid>`) and attributed
- * GUIDs (`<guid isPermaLink="false">value</guid>`).
- */
-function extractGuid(item: Record<string, unknown>): string | undefined {
-  const node = (item.guid as any)?.[0];
-  if (typeof node === 'string') return node;
-  if (node && typeof node === 'object') return (node as any)?._;
+export function toRFC822(date: Date): string {
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const dayName = days[date.getUTCDay()];
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  const month = months[date.getUTCMonth()];
+  const year = date.getUTCFullYear();
+  const hours = String(date.getUTCHours()).padStart(2, '0');
+  const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+  const seconds = String(date.getUTCSeconds()).padStart(2, '0');
+  return `${dayName}, ${day} ${month} ${year} ${hours}:${minutes}:${seconds} GMT`;
+}
+
+export function formatDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function extractGuid(item: Record<string, unknown> | undefined): string | undefined {
+  if (!item) return undefined;
+  if (!item?.guid) return undefined;
+  
+  // Handle array of strings (xml2js wraps text content in arrays)
+  if (Array.isArray(item.guid)) {
+    const first = item.guid[0];
+    if (typeof first === 'string') return first;
+    if (typeof first === 'object' && first !== null) {
+      const guidObj = first as Record<string, unknown>;
+      return (guidObj['_'] as string | undefined) ?? ((guidObj['$'] as Record<string, unknown>)?.['_'] as string | undefined);
+    }
+  }
+  
+  // Handle object with $_ (xml2js attribute syntax)
+  if (typeof item.guid === 'object' && item.guid !== null) {
+    const guidObj = item.guid as Record<string, unknown>;
+    return (guidObj['_'] as string | undefined) ?? ((guidObj['$'] as Record<string, unknown>)?.['_'] as string | undefined);
+  }
+  
+  // Handle plain string
+  if (typeof item.guid === 'string') return item.guid;
+  
   return undefined;
 }
 
-/**
- * Format seconds as HH:MM:SS.
- */
-export function formatDuration(totalSeconds: number): string {
-  const rounded = Math.round(totalSeconds);
-  const hours = Math.floor(rounded / 3600);
-  const minutes = Math.floor((rounded % 3600) / 60);
-  const seconds = rounded % 60;
-
-  const hh = String(hours).padStart(2, '0');
-  const mm = String(minutes).padStart(2, '0');
-  const ss = String(seconds).padStart(2, '0');
-
-  return `${hh}:${mm}:${ss}`;
-}
-
-/**
- * Convert a Date to RFC 822 format in UTC.
- *
- * RFC 822 example: "Mon, 01 Jan 2026 10:30:00 GMT"
- */
-export function toRFC822(date: Date): string {
-  return date.toUTCString();
-}
-
-/**
- * Truncate a string to `maxLength` characters at the nearest word boundary.
- *
- * Splits at the last whitespace before the limit so that partial words
- * are not emitted.
- */
 function truncateAtWord(text: string, maxLength: number, includeEllipsis?: boolean): string {
   if (text.length <= maxLength) return text;
-
-  const ellipsis = includeEllipsis ? '...' : '';
-  let truncated = text.slice(0, maxLength - ellipsis.length);
-  // Find the last whitespace character scanning from the right.
-  let lastWs = -1;
-  for (let i = truncated.length - 1; i >= 0; i--) {
-    if (/\s/.test(truncated[i])) {
-      lastWs = i;
-      break;
-    }
-  }
-  if (lastWs > 0) {
-    truncated = truncated.slice(0, lastWs);
-  }
-  return truncated + ellipsis;
+  const truncated = text.slice(0, maxLength);
+  const lastSpace = truncated.lastIndexOf(' ');
+  const final = lastSpace > maxLength * 0.5 ? truncated.slice(0, lastSpace) : truncated;
+  return includeEllipsis ? final + '...' : final;
 }

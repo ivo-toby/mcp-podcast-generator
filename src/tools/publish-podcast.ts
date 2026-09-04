@@ -390,16 +390,17 @@ async function executePublish(
 }
 
 function validateFilename(filename: string): string | null {
-  // Reject null bytes
-  if (filename.includes('\0')) {
+  // Reject path traversal on the raw input (before basename extraction)
+  if (filename.includes('..')) {
     return 'invalid_output_filename';
   }
-  // Reject path traversal
-  if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+  // Reject null bytes
+  const base = path.basename(filename);
+  if (base.includes('\0')) {
     return 'invalid_output_filename';
   }
   // Must end in .mp3 or .MP3
-  const lower = filename.toLowerCase();
+  const lower = base.toLowerCase();
   if (!lower.endsWith('.mp3')) {
     return 'invalid_output_filename';
   }

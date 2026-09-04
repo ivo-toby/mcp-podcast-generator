@@ -41,6 +41,7 @@ try {
 // --- RSS / feed configuration ---
 let rssFeedBackend: RssFeedBackend | null = null;
 let rssConfig: RssConfig | null = null;
+let storageBackend: S3StorageBackend | null = null;
 const rssFeedUrl = process.env.RSS_FEED_URL;
 const podcastTitle = process.env.PODCAST_TITLE;
 const podcastDescription = process.env.PODCAST_DESCRIPTION;
@@ -103,14 +104,29 @@ if (rssFeedUrl) {
     }
   }
 
-  rssFeedBackend = new RssFeedBackend({
-    title: podcastTitle!,
-    link: podcastLink!,
-    description: podcastDescription!,
-    author: podcastAuthor!,
-    language: podcastLanguage,
-    categories: podcastCategories,
-  });
+  // Create storage backend first so we can use it for RSS PUT operations
+  if (s3Config) {
+    storageBackend = new S3StorageBackend(s3Config);
+    logger.info({ bucket: s3Config.bucket }, 'S3 storage backend created');
+  }
+
+  if (!storageBackend) {
+    throw new Error('S3 storage is required for RSS feed operations');
+  }
+
+  rssFeedBackend = new RssFeedBackend(
+    {
+      title: podcastTitle!,
+      link: podcastLink!,
+      description: podcastDescription!,
+      author: podcastAuthor!,
+      language: podcastLanguage,
+      categories: podcastCategories,
+    },
+    storageBackend,
+    rssFeedUrl,
+    'podcast.xml'
+  );
   rssConfig = {
     feed: rssFeedBackend,
     feedUrl: rssFeedUrl,
@@ -125,13 +141,6 @@ if (rssFeedUrl) {
     publicUrl: config.publicUrl,
   };
   logger.info({ feedUrl: rssFeedUrl }, 'RSS feed enabled');
-}
-
-// --- Storage backend ---
-let storageBackend: S3StorageBackend | null = null;
-if (s3Config) {
-  storageBackend = new S3StorageBackend(s3Config);
-  logger.info({ bucket: s3Config.bucket }, 'S3 storage backend created');
 }
 
 if (!config.googleApiKey) {

@@ -6,3 +6,8 @@ output/
 *.pcm
 *.wav
 .DS_store
+
+# Local TinySDD candidate workspaces and model benchmark profiles.
+# Keep these on disk as evidence; they are not application sources.
+/.tinysdd/
+/profiles/

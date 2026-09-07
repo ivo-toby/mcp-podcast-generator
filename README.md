@@ -1,473 +1,417 @@
 # mcp-podcast-generator
 
-An MCP (Model Context Protocol) server that generates podcast audio from scripts. It runs in Docker, exposes an HTTP endpoint, and provides a `generate_podcast` tool that:
+An MCP (Model Context Protocol) server that generates podcast audio from
+scripts and, when configured, uploads the audio and updates an RSS feed. It
+runs in Docker, exposes a Streamable HTTP endpoint, and uses Google Gemini TTS
+and FFmpeg.
 
-- Converts scripts to speech using **Google Gemini TTS** (`gemini-2.5-flash-preview-tts`)
-- Supports **single-host** monologue and **dual-host** dialogue formats
-- Optionally adds **intro/outro music** fetched from any HTTPS URL (Cloudflare R2, S3, etc.)
-- Applies **EBU R128 loudness normalization** via FFmpeg
-- Outputs the final **MP3** to a volume-mapped `/output` folder
+The MCP operation boundary is asynchronous. A generation or publishing call
+returns a job ID immediately; the caller polls get_job_status for progress and
+the terminal result. Do not submit the operation again while a job is queued or
+running.
 
-## Getting Started
+## Getting started
 
 ### Prerequisites
 
-- **Docker** and **Docker Compose** installed ([get Docker](https://docs.docker.com/get-docker/))
-- A **Google AI Studio API key** with access to Gemini models ([get one here](https://aistudio.google.com/app/apikey))
-- (Optional) An intro/outro MP3 hosted on any HTTPS URL (Cloudflare R2, S3, etc.)
+- Docker and Docker Compose ([install Docker](https://docs.docker.com/get-docker/))
+- A Google AI Studio API key ([get one here](https://aistudio.google.com/app/apikey))
+- jq for the command-line examples
+- Optional intro/outro MP3 files hosted at HTTPS URLs
 
-### 1. Clone and configure
-
-```bash
+~~~bash
 git clone https://github.com/ivo-toby/mcp-podcast-generator.git
 cd mcp-podcast-generator
-
 cp .env.example .env
-```
-
-Open `.env` and set your API key:
-
-```dotenv
-GOOGLE_API_KEY=your_api_key_here
-```
-
-### 2. Create the output directory
-
-MP3 files are written to `./output` on the host (mapped to `/output` inside the container):
-
-```bash
 mkdir -p output
-```
+~~~
 
-### 3. Start the server
+Set GOOGLE_API_KEY in .env. The default EXPOSE_SEPARATE_TOOLS=false exposes
+the combined operation and status tool. The optional S3 and RSS settings can be
+left disabled when audio generation is all that is needed.
 
-```bash
-docker compose up
-```
+Start the server after editing .env:
 
-The first run builds the Docker image (a few minutes). On success you'll see:
-
-```
-mcp-podcast-generator  | MCP Podcast Generator listening on port 3000
-```
-
-To run in the background (detached):
-
-```bash
-docker compose up -d
-```
-
-### 4. Verify it's running
-
-```bash
-curl http://localhost:3000/health
-# → {"status":"ok"}
-```
-
-### Common Docker operations
-
-```bash
-# View logs (follow mode)
-docker compose logs -f
-
-# Stop the server
-docker compose down
-
-# Rebuild the image after code changes
+~~~bash
 docker compose up --build
+~~~
 
-# Remove containers and volumes (full reset)
+Verify the server:
+
+~~~bash
+curl -fsS http://localhost:3000/health | jq .
+~~~
+
+Common Docker operations:
+
+~~~bash
+docker compose logs -f
+docker compose down
+docker compose up --build
 docker compose down -v
-```
+~~~
 
-### 5. Generate your first podcast
+The server must remain running while jobs execute. Jobs and their status records
+are process-local; restarting the container loses queued, running, and
+stored terminal jobs, whether or not they were polled.
 
-```bash
-curl -s -X POST http://localhost:3000/mcp \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "tools/call",
-    "params": {
-      "name": "generate_podcast",
-      "arguments": {
-        "type": "single",
-        "hosts": [{ "name": "Host", "voice": "Kore" }],
-        "segments": [
-          { "text": "Welcome to my first AI-generated podcast episode." },
-          { "text": "Today we explore how easy it is to turn a script into audio." },
-          { "text": "Thanks for listening. See you next time!" }
-        ],
-        "outputFilename": "first-episode.mp3"
+## Tool visibility and workflow
+
+The environment is read when the process starts:
+
+| EXPOSE_SEPARATE_TOOLS | Exposed operation tools | Always exposed |
+| --- | --- | --- |
+| absent, empty, or any value other than the literal true | generate_and_publish | get_job_status |
+| exactly true | generate_podcast, publish_podcast, generate_and_publish | get_job_status |
+
+Changing the value requires a server restart. With the default configuration,
+generate_and_publish always generates and then attempts to publish the same
+MP3. It is not a generation-only shortcut. If a user asks only for an MP3,
+enable EXPOSE_SEPARATE_TOOLS=true, restart, and use generate_podcast; do not
+call the combined tool merely because it is visible by default.
+
+The separate publish_podcast tool is exposed when the flag is exactly true,
+even if neither S3 nor RSS is configured. Such a job reaches terminal failure
+with no_storage_or_feed_configured rather than disappearing from the tool list.
+
+### Immediate response (breaking response change)
+
+All operation tools validate input, enqueue a job, and return without waiting
+for Gemini, FFmpeg, S3, or RSS work. A valid JSON-RPC call returns this MCP
+envelope (the text block contains the same serialized payload):
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "structuredContent": {
+      "jobId": "7f2d0e3d-8f3d-4f0d-9c5b-3f6c31f3e351",
+      "operation": "generate_and_publish",
+      "status": "queued",
+      "stage": "queued",
+      "pollIntervalSeconds": 5,
+      "message": "Job accepted. Retain this jobId and poll get_job_status for updates. Do not resubmit."
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"jobId\":\"7f2d0e3d-8f3d-4f0d-9c5b-3f6c31f3e351\",\"operation\":\"generate_and_publish\",\"status\":\"queued\",\"stage\":\"queued\",\"pollIntervalSeconds\":5,\"message\":\"Job accepted. Retain this jobId and poll get_job_status for updates. Do not resubmit.\"}"
       }
-    }
-  }' | jq .
-```
-
-On success you'll get back the output path and duration:
-
-```json
-{
-  "success": true,
-  "outputPath": "/output/first-episode.mp3",
-  "durationSeconds": 18.4,
-  "downloadUrl": "http://localhost:3000/output/first-episode.mp3"
-}
-```
-
-Your MP3 is available at `http://localhost:3000/output/first-episode.mp3` and on disk at `./output/first-episode.mp3`.
-
-### 6. Install in Claude Desktop (optional)
-
-With the container running, add the server to Claude Desktop's MCP configuration.
-
-**Find your config file:**
-
-| OS | Path |
-|---|---|
-| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
-| Linux | `~/.config/Claude/claude_desktop_config.json` |
-
-**Add the server:**
-
-```json
-{
-  "mcpServers": {
-    "podcast-generator": {
-      "command": "npx",
-      "args": ["mcp-remote", "http://localhost:3000/mcp"]
-    }
+    ]
   }
 }
-```
+~~~
 
-Claude Desktop doesn't support Streamable HTTP directly — `mcp-remote` bridges the connection. `npx` will download it automatically on first run.
+The object is returned as MCP structuredContent and as the same serialized JSON
+in a text content block. Invalid arguments fail normal MCP schema validation
+and do not create a job. The old synchronous operation response is no longer
+returned from the operation call; final output is available only through
+get_job_status.
 
-If you already have other MCP servers configured, add `podcast-generator` alongside them inside the existing `mcpServers` object.
+### Polling and terminal results
 
-**Restart Claude Desktop.** The `generate_podcast` tool will appear in the tools panel. You can now ask Claude to generate a podcast directly:
+Call get_job_status with the returned UUID approximately every five seconds:
 
-> *"Generate a 5-minute dual-host podcast about the future of open source, using Alex (Charon) and Sam (Aoede), with intro music from https://podcast.briefcast.online/assets/music/intro.mp3, and save it as open-source-ep1.mp3"*
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "get_job_status",
+    "arguments": { "jobId": "7f2d0e3d-8f3d-4f0d-9c5b-3f6c31f3e351" }
+  }
+}
+~~~
 
-Claude will call the tool and return the output path when done.
+Known jobs report queued, running, succeeded, or failed. While running, stage is
+one of generating, probing, uploading, or updating_feed. Terminal stages are
+completed and failed.
 
-## Environment Variables
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "structuredContent": {
+      "jobId": "7f2d0e3d-8f3d-4f0d-9c5b-3f6c31f3e351",
+      "operation": "generate_and_publish",
+      "status": "succeeded",
+      "stage": "completed",
+      "result": {
+        "success": true,
+        "downloadUrl": "http://localhost:3000/output/episode-42.mp3"
+      }
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"jobId\":\"7f2d0e3d-8f3d-4f0d-9c5b-3f6c31f3e351\",\"operation\":\"generate_and_publish\",\"status\":\"succeeded\",\"stage\":\"completed\",\"result\":{\"success\":true,\"downloadUrl\":\"http://localhost:3000/output/episode-42.mp3\"}}"
+      }
+    ]
+  }
+}
+~~~
+
+Terminal result by operation:
+
+- generate_podcast: existing generation output plus downloadUrl.
+- publish_podcast: existing PublishResult, including s3 and rss stage results.
+- generate_and_publish: generation, publish, and downloadUrl when the combined
+  job succeeds.
+
+If generation succeeds but publishing does not, the combined failed status still
+includes the generated result and publish result. The audio already exists, so
+do not regenerate it; inspect the per-stage result. A generated download link
+remains available even when publishing fails. If one publish stage succeeds
+while another fails, PublishResult.success remains true and the terminal job
+can still be succeeded; the failed stage is retained in result.publish.stages.
+If both publish stages fail or are skipped, the combined job is failed. An
+uncaught executor exception is reported as error.code: "job_execution_failed".
+
+A valid but unknown or expired ID returns errorCode: "job_not_found" and never
+starts work. Polling a terminal job never runs the executor again. Retain the ID
+and poll; a slow response or client timeout is not a reason to submit generation
+again. If the response or process is lost, an unknown ID is not evidence that
+work did not run; inspect the output/backend before deciding on a new request.
+
+### Reproducible curl flow
+
+This uses the default combined tool. It extracts the ID from structuredContent
+(and falls back to the text block), then polls until a terminal status:
+
+~~~bash
+set -euo pipefail
+MCP_URL=http://localhost:3000/mcp
+
+call_mcp() {
+  response=$(curl -fsS "$MCP_URL" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    --data-binary "$1")
+  if jq -e . >/dev/null 2>&1 <<<"$response"; then
+    printf '%s\n' "$response"
+  else
+    # Streamable HTTP may return an SSE envelope: event: message + data: JSON.
+    data=$(sed -n 's/^data: //p' <<<"$response" | tail -n 1)
+    test -n "$data" || { echo "MCP response was neither JSON nor SSE" >&2; exit 1; }
+    printf '%s\n' "$data"
+  fi
+}
+
+accepted=$(call_mcp '{
+  "jsonrpc":"2.0","id":1,"method":"tools/call",
+  "params":{"name":"generate_and_publish","arguments":{
+    "type":"single",
+    "hosts":[{"name":"Host","voice":"Kore"}],
+    "segments":[{"text":"Welcome to the async podcast demo."}],
+    "outputFilename":"async-demo.mp3",
+    "episodeTitle":"Async podcast demo",
+    "episodeDescription":"A short demonstration of submit-then-poll."
+  }}
+}')
+job_id=$(jq -r '.result.structuredContent.jobId // (.result.content[0].text | fromjson | .jobId)' <<<"$accepted")
+test -n "$job_id" && test "$job_id" != null || { echo "No job ID in accepted response" >&2; exit 1; }
+
+while :; do
+  status=$(call_mcp "$(jq -cn --arg id "$job_id" '{
+    jsonrpc:"2.0",id:2,method:"tools/call",
+    params:{name:"get_job_status",arguments:{jobId:$id}}
+  }')")
+  state=$(jq -r '.result.structuredContent.status // (.result.content[0].text | fromjson | .status // "unknown")' <<<"$status")
+  jq '.result.structuredContent // (.result.content[0].text | fromjson)' <<<"$status"
+  case "$state" in
+    succeeded|failed) break ;;
+    queued|running) sleep 5 ;;
+    *) echo "Unexpected MCP job status: $state" >&2; exit 1 ;;
+  esac
+done
+~~~
+
+### Job lifetime and deployment limits
+
+- The queue is FIFO and runs at most one job at a time. Later submissions stay
+  queued, bounding TTS/FFmpeg work and large S3 buffers.
+- Job records live in process memory. Terminal records are retained for 24
+  hours and may be pruned during normal job-store access.
+- A process restart loses all job records and running work. The server does not
+  resume interrupted generation or uploads.
+- The job store is not shared across processes, replicas, or containers. Route
+  submit and poll requests to the same single instance. A durable queue/database
+  is intentionally out of scope.
+- There is no cancellation, pause/resume, arbitrary priority, client task
+  negotiation, or automatic generation retry.
+
+## Operation inputs
+
+### generate_and_publish
+
+The default combined operation accepts the union of generation and publishing
+inputs. Generation runs exactly once, then the generated file is passed to the
+publishing core exactly once.
+
+~~~typescript
+{
+  type: "single" | "dual";
+  hosts: Array<{ name: string; voice: string }>;
+  segments: Array<{ speaker?: string; text: string }>;
+  outputFilename: string;
+  introMusicUrl?: string;
+  outroMusicUrl?: string;
+  fadeInDuration?: number; // default 2, range 0..30
+  fadeOutDuration?: number; // default 3, range 0..30
+  targetLufs?: number; // default -16, range -40..-5
+  episodeTitle: string; // 1..250 characters
+  episodeDescription: string; // 1..5000 characters
+  episodeNumber?: number; // positive integer
+  episodeSeason?: number; // positive integer
+  episodeGuid?: string; // defaults to outputFilename
+  episodePublishedAt?: string; // RFC 3339; defaults to now
+}
+~~~
+
+For dual-host episodes provide exactly two hosts and a matching speaker on every
+segment. For single-host episodes provide one host and omit speaker.
+outputFilename should be a simple .mp3 basename without /, \, or .. so it can
+also be published safely.
+
+### generate_podcast (opt-in)
+
+When EXPOSE_SEPARATE_TOOLS=true, this operation accepts the generation fields
+above and writes an MP3 to OUTPUT_DIR; it does not publish. Its terminal result
+contains outputPath, durationSeconds, and downloadUrl.
+
+### publish_podcast (opt-in)
+
+When EXPOSE_SEPARATE_TOOLS=true, this operation accepts:
+
+~~~typescript
+{
+  outputFilename: string;
+  episodeTitle: string;
+  episodeDescription: string;
+  episodeNumber?: number;
+  episodeSeason?: number;
+  episodeGuid?: string;
+  episodePublishedAt?: string;
+}
+~~~
+
+It publishes an existing MP3 in OUTPUT_DIR. It can be exposed even when no
+backend is configured; that job returns no_storage_or_feed_configured.
+
+## Environment variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `GOOGLE_API_KEY` | ✅ | — | Google AI Studio API key ([get one here](https://aistudio.google.com/app/apikey)) |
-| `OUTPUT_DIR` | | `/output` | Directory where MP3 files are written |
-| `TEMP_DIR` | | `/tmp/podcast-gen` | Temporary processing directory |
-| `PORT` | | `3000` | HTTP server port |
-| `PUBLIC_URL` | | `http://localhost:3000` | Base URL for download links. For RSS-only mode this **must** be a public HTTP(S) hostname — localhost, 127.0.0.0/8, ::1, fe80::*, and 0.0.0.0 are rejected. |
-| `S3_ENDPOINT` | | — | S3-compatible endpoint URL (e.g. `https://s3.amazonaws.com`). All 5 S3 vars must be set together. |
-| `S3_REGION` | | `us-east-1` | AWS region. For Cloudflare R2, set to `auto` — R2 is regionless. |
-| `S3_ACCESS_KEY_ID` | | — | S3 access key |
-| `S3_SECRET_ACCESS_KEY` | | — | S3 secret key |
-| `S3_BUCKET` | | — | S3 bucket name |
-| `S3_PUBLIC_URL` | | — | Public CDN URL for uploaded files |
-| `S3_FORCE_PATH_STYLE` | | `false` | Force path-style URLs. Set to `true` for Cloudflare R2 and MinIO. |
-**Cloudflare R2 note:** Replace `<account-id>` in your endpoint with your Cloudflare account ID (found in the dashboard URL). Create an R2 API token with "R2 Objects Read & Write" scope. Set `S3_FORCE_PATH_STYLE=true` — required for R2 since it uses path-style URLs.
+| GOOGLE_API_KEY | yes | — | Google AI Studio API key |
+| EXPOSE_SEPARATE_TOOLS | | false | Literal true exposes generate_podcast and publish_podcast; read at startup. |
+| OUTPUT_DIR | | /output | Directory where MP3 files are written |
+| TEMP_DIR | | /tmp/podcast-gen | Temporary processing directory |
+| PORT | | 3000 | HTTP server port |
+| LOG_LEVEL | | info | Log level (info, debug, warn, error) |
+| PUBLIC_URL | | http://localhost:3000 | Download base URL; public HTTP(S) required for RSS-only mode. |
+| S3_ENDPOINT | | — | S3-compatible endpoint; set all required S3 variables together. |
+| S3_REGION | | us-east-1 | Signing region; auto is suitable for Cloudflare R2. |
+| S3_ACCESS_KEY_ID | | — | S3 access key |
+| S3_SECRET_ACCESS_KEY | | — | S3 secret key |
+| S3_BUCKET | | — | S3 bucket name |
+| S3_PUBLIC_URL | | — | Public base URL for uploaded media |
+| S3_FORCE_PATH_STYLE | | false | Path-style addressing where required, such as MinIO; only literal true enables it. |
+| RSS_FEED_URL | | — | RSS feed URL that supports GET and PUT |
+| PODCAST_TITLE | | — | Podcast title; required when RSS is configured |
+| PODCAST_DESCRIPTION | | — | Podcast description; required when RSS is configured |
+| PODCAST_LINK | | — | Podcast website; required when RSS is configured |
+| PODCAST_AUTHOR | | — | Podcast author; required when RSS is configured |
+| PODCAST_LANGUAGE | | en-us | Podcast language |
+| PODCAST_CATEGORIES | | Technology | Comma-separated RSS categories |
 
-| `RSS_FEED_URL` | | — | RSS feed URL to update |
-| `PODCAST_TITLE` | | — | Podcast title |
-| `PODCAST_DESCRIPTION` | | — | Podcast description |
-| `PODCAST_LINK` | | — | Podcast website |
-| `PODCAST_AUTHOR` | | — | Podcast author |
-| `PODCAST_LANGUAGE` | | `en-us` | Podcast language |
-| `PODCAST_CATEGORIES` | | `Technology` | Comma-separated categories |
+S3 is disabled when all five required S3 variables are absent. If any is
+present, all five (S3_ENDPOINT, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY,
+S3_BUCKET, and S3_PUBLIC_URL) must be present or startup fails.
+S3_FORCE_PATH_STYLE alone does not enable S3.
+
+RSS requires RSS_FEED_URL, PODCAST_TITLE, PODCAST_DESCRIPTION, PODCAST_LINK,
+and PODCAST_AUTHOR. Without S3, PUBLIC_URL must be public HTTP(S); localhost
+and loopback addresses are rejected because RSS enclosures point at /output/.
+With S3, the enclosure uses the uploaded media URL.
+
+## Storage and RSS behavior
+
+The publishing core preserves per-stage results:
+
+~~~typescript
+interface PublishResult {
+  success: boolean; // true when S3 or RSS succeeds
+  stages: { s3: StageResult; rss: StageResult };
+  fileSizeBytes?: number;
+  durationSeconds?: number;
+  probeStatFailed?: boolean;
+  probeFFprobeFailed?: boolean;
+  errorCode?: string;
+}
+~~~
+
+An S3 upload uses the key episodes/<outputFilename> and buffers the MP3 for
+SDK retry behavior. Files over 500 MB are rejected. RSS updates use ETag and
+conditional PUTs, retrying a 412 Precondition Failed or creation conflict up
+to three total attempts. Existing channel metadata is preserved and duplicate
+GUIDs are rejected.
+
+Stable error codes include file_not_found, invalid_output_filename,
+path_traversal_attempted, file_too_large, probe_stat_failed,
+probe_ffprobe_failed, s3_upload_failed, rss_fetch_failed, rss_create_failed,
+rss_update_failed, rss_duplicate_guid, rss_missing_media_url, and
+no_storage_or_feed_configured.
+
+Limitations include no RSS authentication, publicly readable S3/CDN media, and
+no streaming upload. If a feed host omits usable ETags, updates fall back to
+last-write-wins.
 
 ## Architecture
 
-This server supports two optional backends:
+~~~text
+MCP operation call
+      │ validates and enqueues
+      ▼
+Process-local FIFO job manager (one active job)
+      │
+      ├── Gemini TTS + FFmpeg → /output/episode.mp3
+      └── S3 upload and/or RSS GET/merge/conditional PUT
+      │
+      ▼
+get_job_status → stage updates and terminal result
+~~~
 
-- **S3-compatible storage** — uploads generated MP3s to an S3 bucket or MinIO instance. Uses a `Buffer` (not streams) to avoid AWS SDK v3 retry hangs ([#5479](https://github.com/aws/aws-sdk-js-v3/issues/5479)).
-- **RSS feed backend** — maintains an RSS 2.0 feed with iTunes podcast extensions. Uses `xml2js` for XML parsing/building. Supports concurrent PUT with ETag/If-Match retry (412 → re-fetch → re-merge → PUT).
+The generation pipeline uses gemini-2.5-flash-preview-tts, converts PCM to MP3
+with FFmpeg, and applies EBU R128 normalization (default target -16 LUFS).
+Optional intro/outro URLs are downloaded and mixed by the audio assembler.
 
-Both backends are abstracted behind `StorageBackend` and `FeedBackend` interfaces so future providers can be added without changing the publish handler.
-
-## Dependencies
-
-| Package | Purpose |
-|---|---|
-| `@aws-sdk/client-s3` | S3-compatible storage client |
-| `xml2js` | RSS feed XML parsing and building |
-| `@types/xml2js` | TypeScript types for xml2js |
-
-## Tool: `publish_podcast`
-
-Publish a generated podcast MP3 to S3 storage and/or update the RSS feed.
-
-### Input
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `outputFilename` | string | ✅ | MP3 filename (must be `.mp3`) |
-| `episodeTitle` | string | ✅ | Episode title (1–250 chars) |
-| `episodeDescription` | string | ✅ | Episode description (1–5000 chars) |
-| `episodeGuid` | string | | Unique identifier; defaults to filename |
-| `episodePublishedAt` | string | | RFC 3339 datetime; defaults to now |
-| `episodeNumber` | number | | Episode number |
-| `episodeSeason` | number | | Season number |
-
-### Output
-
-```typescript
-{
-  success: boolean;
-  stages: {
-    s3: { status: 'succeeded' | 'failed' | 'skipped'; errorCode?: string; s3Url?: string };
-    rss: { status: 'succeeded' | 'failed' | 'skipped'; errorCode?: string; feedUrl?: string };
-  };
-  fileSizeBytes?: number;
-  durationSeconds?: number;
-  errorCode?: string;
-  probeStatFailed?: boolean;
-  probeFFprobeFailed?: boolean;
-}
-```
-
-### Concurrency model
-
-RSS feed updates use ETag-based concurrency control with S3 `IfMatch`/`IfNoneMatch` headers (or HTTP `If-Match`/`If-None-Match` for RSS-only mode):
-- Create (no existing feed): PUT with `If-None-Match: *`
-- Update (feed exists): PUT with `If-Match: <etag>`
-- `412 Precondition Failed` or `409 Conflict` → re-fetch feed, re-merge episode, re-PUT with new ETag
-- Max 3 PUT attempts before failing with `rss_update_failed` or `rss_create_failed`
-
-### Limitations
-
-- **RSS authentication** — Basic auth / API keys for feed URLs are not supported. Feed URLs must be publicly accessible.
-- **S3 public-read** — The bucket (or CDN) must allow public read for enclosure URLs to work.
-- **ETag precision** — If the feed server returns imprecise or missing ETags, concurrency falls back to last-write-wins.
-- **RSS-only** — When S3 is not configured, `PUBLIC_URL` is required and must be a public HTTP(S) URL (no loopback/localhost ranges).
-- **File size** — Files over 500 MB are rejected. The entire file is read into a Buffer for upload (to avoid stream retry issues).
-- **No streaming** — Large files are buffered in memory. For very large files consider increasing heap (`--max-old-space-size`).
-
-## MCP Endpoint
-
-**POST** `/mcp` — Streamable HTTP transport (JSON-RPC 2.0)
-
-**GET** `/health` — Health check, returns `{ "status": "ok" }`
-
-## Tool: `generate_podcast`
-
-### Input Schema
-
-```typescript
-{
-  // "single" = one host monologue, "dual" = two-host dialogue
-  type: "single" | "dual";
-
-  // Host configurations (1 for single, exactly 2 for dual)
-  hosts: Array<{
-    name: string;   // Speaker label, e.g. "Alex"
-    voice: string;  // Gemini prebuilt voice name (see list below)
-  }>;
-
-  // Script segments
-  segments: Array<{
-    speaker?: string;  // Must match a host name (required for dual-host)
-    text: string;      // The text to speak
-  }>;
-
-  // Output filename (written to OUTPUT_DIR)
-  outputFilename: string;  // e.g. "episode-2026-04-02.mp3"
-
-  // Optional music (any HTTPS URL: R2, S3, etc.)
-  introMusicUrl?: string;
-  outroMusicUrl?: string;
-
-  // Audio processing options
-  fadeInDuration?: number;   // seconds, default 2
-  fadeOutDuration?: number;  // seconds, default 3
-  targetLufs?: number;       // LUFS target, default -16
-}
-```
-
-### Output
-
-```json
-{
-  "success": true,
-  "outputPath": "/output/episode-2026-04-02.mp3",
-  "durationSeconds": 245.3,
-  "downloadUrl": "http://localhost:3000/output/episode-2026-04-02.mp3"
-}
-```
-
-## Available Gemini Voices
+## Available Gemini voices
 
 | Voice | Character |
 |---|---|
-| `Aoede` | Warm, storytelling |
-| `Charon` | Deep, authoritative |
-| `Fenrir` | Bold, energetic |
-| `Kore` | Clear, professional |
-| `Puck` | Bright, conversational |
-| `Orbit` | Smooth, measured |
-| `Perseus` | Confident, direct |
-| `Tethys` | Calm, thoughtful |
-| `Vega` | Dynamic, expressive |
-| `Zubenelgenubi` | Distinctive, memorable |
+| Aoede | Warm, storytelling |
+| Charon | Deep, authoritative |
+| Fenrir | Bold, energetic |
+| Kore | Clear, professional |
+| Puck | Bright, conversational |
+| Orbit | Smooth, measured |
+| Perseus | Confident, direct |
+| Tethys | Calm, thoughtful |
+| Vega | Dynamic, expressive |
+| Zubenelgenubi | Distinctive, memorable |
 
-## Example MCP Calls
+## MCP endpoint and clients
 
-### Single Host
+- POST /mcp — Streamable HTTP transport (JSON-RPC 2.0)
+- GET /health — health check
+- GET /output/<filename> — generated MP3s served by the HTTP server
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "generate_podcast",
-    "arguments": {
-      "type": "single",
-      "hosts": [{ "name": "Alex", "voice": "Charon" }],
-      "segments": [
-        { "text": "Welcome to Tech Weekly, your daily dose of AI news." },
-        { "text": "Today we're covering the latest developments in language models." },
-        { "text": "That's all for today. Thanks for listening!" }
-      ],
-      "outputFilename": "episode-2026-04-02.mp3",
-      "introMusicUrl": "https://your-bucket.r2.dev/intro.mp3",
-      "outroMusicUrl": "https://your-bucket.r2.dev/outro.mp3"
-    }
-  }
-}
-```
+For Claude Desktop or another client that needs a stdio bridge:
 
-### Dual Host
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "generate_podcast",
-    "arguments": {
-      "type": "dual",
-      "hosts": [
-        { "name": "Alex", "voice": "Charon" },
-        { "name": "Sam",  "voice": "Puck"   }
-      ],
-      "segments": [
-        { "speaker": "Alex", "text": "Welcome back to the show! I'm Alex." },
-        { "speaker": "Sam",  "text": "And I'm Sam. Today we're talking about MCP servers." },
-        { "speaker": "Alex", "text": "It's a fascinating topic. Let's dive in." },
-        { "speaker": "Sam",  "text": "Absolutely. Thanks everyone for listening!" }
-      ],
-      "outputFilename": "episode-dual-2026-04-02.mp3",
-      "introMusicUrl": "https://your-bucket.r2.dev/intro.mp3",
-      "outroMusicUrl": "https://your-bucket.r2.dev/outro.mp3",
-      "fadeInDuration": 3,
-      "fadeOutDuration": 4,
-      "targetLufs": -16
-    }
-  }
-}
-```
-
-### curl Example
-
-```bash
-curl -X POST http://localhost:3000/mcp \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "tools/call",
-    "params": {
-      "name": "generate_podcast",
-      "arguments": {
-        "type": "single",
-        "hosts": [{ "name": "Host", "voice": "Kore" }],
-        "segments": [{ "text": "Hello world, this is a test podcast episode." }],
-        "outputFilename": "test.mp3"
-      }
-    }
-  }'
-```
-
-## Audio Pipeline
-
-```
-Input Script
-     │
-     ▼
-Gemini TTS (gemini-2.5-flash-preview-tts)
-     │  PCM 24kHz 16-bit mono (base64)
-     ▼
-FFmpeg: PCM → MP3 (192kbps libmp3lame)
-     │
-     ▼
-EBU R128 Normalization (two-pass, target: -16 LUFS)
-     │
-     ├── [intro music URL] → download → fade-in
-     │
-     ├── TTS audio (normalized)
-     │
-     └── [outro music URL] → download → fade-out
-          │
-          ▼
-     FFmpeg concat (re-encoded, avoids frame boundary issues)
-          │
-          ▼
-     Final EBU R128 normalization pass
-          │
-          ▼
-     /output/episode.mp3
-```
-
-## S3 Upload & RSS Publishing
-
-Optionally configure S3 storage and RSS feed publishing by setting environment variables.
-
-### S3 Storage
-
-Upload generated MP3s to an S3-compatible bucket:
-
-```bash
-export S3_ENDPOINT=https://s3.amazonaws.com
-export S3_ACCESS_KEY_ID=...
-export S3_SECRET_ACCESS_KEY=...
-export S3_BUCKET=my-podcasts
-export S3_PUBLIC_URL=https://cdn.example.com
-```
-
-All five variables must be set together — omit all to disable.
-
-### RSS Feed
-
-Maintain an RSS 2.0 feed that the `publish_podcast` tool updates on each call:
-
-```bash
-export RSS_FEED_URL=https://cdn.example.com/podcast.xml
-export PODCAST_TITLE=My Podcast
-export PODCAST_DESCRIPTION=A podcast about engineering
-export PODCAST_LINK=https://example.com
-export PODCAST_AUTHOR=Jane Doe
-```
-
-Omit all to disable RSS. `PODCAST_LANGUAGE` defaults to `en-us`; `PODCAST_CATEGORIES` defaults to `Technology`.
-
-**RSS-only mode** (S3 not configured): `PUBLIC_URL` must be set and must resolve to a public HTTP(S) hostname — `localhost`, `127.*`, `::1`, `fe80::*`, and `0.0.0.0` are rejected. Malformed or non-HTTP(S) URLs also fail.
-
-### Publish Tool
-
-The `publish_podcast` MCP tool reads an existing MP3, uploads it to S3 (if configured), and appends an episode entry to the RSS feed (if configured). It validates the output file, probes duration with `ffprobe`, and returns structured per-stage results.
-
-## Using with an MCP Client
-
-Add to your MCP client configuration:
-
-```json
+~~~json
 {
   "mcpServers": {
     "podcast-generator": {
@@ -476,17 +420,30 @@ Add to your MCP client configuration:
     }
   }
 }
-```
+~~~
+
+With the default tool list, ask the client to generate and publish through
+generate_and_publish, then poll get_job_status. For generation-only requests,
+enable the separate tools and restart first.
 
 ## Development
 
-```bash
+~~~bash
 npm install
-npm run dev   # runs tsx src/index.ts directly
-```
+npm run dev
+~~~
 
-Requires `ffmpeg` and `ffprobe` installed locally for development.
+Local development requires ffmpeg and ffprobe. Repository gates:
+
+~~~bash
+npm test
+npm run build
+npm run test:smoke
+~~~
 
 ## Related
 
-- [briefcast](https://github.com/ivo-toby/briefcast) — Full podcast pipeline that uses this server for audio generation
+- [Asynchronous generation and publishing spec](docs/SPEC-async-generation-publishing.md)
+- [Asynchronous implementation plan](docs/implementation-plan-async-jobs.md)
+- [Upload and publish backend spec](docs/SPEC-upload-publish.md)
+- [briefcast](https://github.com/ivo-toby/briefcast) — full podcast pipeline

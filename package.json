@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
+    "test:smoke": "npm run build && node scripts/smoke-async-jobs.mjs",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },

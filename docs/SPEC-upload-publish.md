@@ -1,17 +1,68 @@
 # Upload & Publish: S3 + RSS Feed
 
+> **Current MCP boundary:** The asynchronous contract in
+> [SPEC-async-generation-publishing.md](./SPEC-async-generation-publishing.md)
+> supersedes the synchronous tool-flow statements in this historical backend
+> spec. Operation calls now enqueue jobs and return `JobAccepted`; callers
+> retrieve this document's `PublishResult` through `get_job_status`. The
+> combined `generate_and_publish` and `get_job_status` tools are exposed by
+> default. `generate_podcast` and `publish_podcast` are exposed only when
+> `EXPOSE_SEPARATE_TOOLS` is exactly `true` at process startup.
+
 ## Goal
 
-After generating a podcast MP3, optionally upload it to S3-compatible storage and update (or create) an RSS feed. Two separate MCP tools: `generate_podcast` (existing, unchanged) and `publish_podcast` (optional, only active when configured).
+After generating a podcast MP3, optionally upload it to S3-compatible storage
+and update (or create) an RSS feed. The publishing core remains provider
+neutral and returns a per-stage `PublishResult`; asynchronous job orchestration
+is defined by the async spec linked above.
 
 ## Design Decisions
 
 - **One S3 bucket per server instance.** Configured at startup via env vars. All-or-none validation: either all S3 vars are set, or S3 is disabled.
 - **One RSS feed per server instance.** Configured at startup. If the feed doesn't exist at the configured URL, create it. If it exists, append an episode (with ETag/If-Match retry for concurrency safety).
 - **Provider-neutral media abstraction.** The feed layer receives `MediaAsset { url, lengthBytes, mimeType }` — never an S3-specific value. In RSS-only mode (no S3), the media URL points to the server's `/output/` route (not an external CDN), because the file is never uploaded anywhere else.
-- **Two separate MCP tools.** `generate_podcast` writes to `/output`. `publish_podcast` takes the file and pushes to S3 + RSS. If either S3 or RSS isn't configured, skip that step silently.
-- **No breaking changes.** Existing `generate_podcast` behavior stays identical.
-- **Discriminated response with per-stage status.** Every publish call returns a structured result showing which stages succeeded, failed, or were skipped.
+- **Separate operation cores.** Generation writes to `/output`, and publishing
+  takes an existing file and pushes to S3 + RSS. If either S3 or RSS isn't
+  configured, skip that step silently. Their MCP adapters are opt-in; the
+  default client-facing workflow is the combined asynchronous operation.
+- **Breaking MCP boundary, stable cores.** The old synchronous operation
+  response is replaced by a job-accepted response. The generation and
+  publishing input fields and the `PublishResult` backend contract remain
+  unchanged.
+- **Discriminated response with per-stage status.** Every publish core
+  invocation returns a structured result showing which stages succeeded,
+  failed, or were skipped.
+
+## Current asynchronous MCP boundary
+
+The backend behavior below is invoked by a process-local asynchronous job
+manager. Tool visibility and response shape are defined by
+[SPEC-async-generation-publishing.md](./SPEC-async-generation-publishing.md):
+
+- By default, `tools/list` contains `generate_and_publish` and
+  `get_job_status`. The combined operation generates once and then publishes
+  that output; it is not a generation-only operation.
+- When `EXPOSE_SEPARATE_TOOLS` is exactly the literal string `true` at
+  startup, `generate_podcast` and `publish_podcast` are also exposed. The
+  separate publish tool remains visible even when no backend is configured and
+  then reports `no_storage_or_feed_configured`.
+- Every valid operation call returns `JobAccepted` immediately with a UUID,
+  `status: "queued"`, `stage: "queued"`, a five-second poll interval,
+  and a message telling the caller to poll rather than resubmit. It returns
+  the same JSON in MCP `structuredContent` and a text content block.
+- Callers poll `get_job_status`; a combined job stores the
+  `PublishResult` in terminal `result.publish`, while a separate
+  `publish_podcast` job stores it directly in terminal `result`. Unknown or
+  expired IDs return `errorCode: "job_not_found"` and never execute work.
+- A publish result with one successful stage and one failed stage remains
+  `success: true`; callers must inspect both stage records. A combined job
+  retains the generated result when a later publish stage fails, so the audio
+  must not be regenerated automatically.
+- Jobs run FIFO with one active executor. Records are process-local, terminal
+  records are retained for 24 hours, and a restart loses queued/running work
+  and status records. Multiple replicas do not share job state; route submit
+  and poll to one instance. There is no durable queue or automatic generation
+  retry.
 
 ## Architecture
 
@@ -19,7 +70,7 @@ After generating a podcast MP3, optionally upload it to S3-compatible storage an
 ┌──────────────────────────────────────────────────────────────┐
 │                     MCP Server                                │
 │                                                               │
-│  generate_podcast (unchanged)                                 │
+│  generation core                                               │
 │    → writes MP3 to /output                                    │
 │                                                               │
 │  publish_podcast (new)                                        │

@@ -111,8 +111,12 @@ export function createPublishHandler(options: PublishHandlerOptions) {
   const hasFeed = !!feed;
   const feedBackend = feed?.feed;
 
-  return async function publishPodcast(input: PublishPodcastInput): Promise<PublishResult> {
+  return async function publishPodcast(
+    input: PublishPodcastInput,
+    stageCallback?: (stage: 'probing' | 'uploading' | 'updating_feed') => void,
+  ): Promise<PublishResult> {
     try {
+      stageCallback?.('probing');
       return await executePublish(input, {
         hasStorage,
         hasFeed,
@@ -122,6 +126,7 @@ export function createPublishHandler(options: PublishHandlerOptions) {
         s3,
         outputDir,
         publishPublicUrl,
+        stageCallback,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -149,6 +154,7 @@ async function executePublish(
     s3: S3PublishConfig | undefined;
     outputDir: string;
     publishPublicUrl: string | undefined;
+    stageCallback?: (stage: 'probing' | 'uploading' | 'updating_feed') => void;
   }
 ): Promise<PublishResult> {
   // Short-circuit if no storage or feed configured
@@ -301,6 +307,7 @@ async function executePublish(
   let mediaAsset: { url: string; lengthBytes: number; mimeType: string } | undefined;
   if (opts.hasStorage) {
     try {
+      opts.stageCallback?.('uploading');
       const s3Key = `episodes/${filename}`;
       mediaAsset = await opts.storage.upload(candidatePath, s3Key);
       s3Result = { status: 'succeeded', s3Url: mediaAsset.url };
@@ -363,6 +370,7 @@ async function executePublish(
       rssResult = { status: 'failed', errorCode: 'rss_config_missing', errorMessage: 'RSS configured but feed backend missing' };
     } else if (mediaAsset && opts.feedBackend) {
       try {
+        opts.stageCallback?.('updating_feed');
         const feedResult = await opts.feedBackend.addEpisode(
           opts.feed!.feedUrl,
           episode,

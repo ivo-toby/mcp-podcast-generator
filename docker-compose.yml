@@ -8,8 +8,11 @@ services:
       - OUTPUT_DIR=/output
       - TEMP_DIR=/tmp/podcast-gen
       - PORT=${PORT:-3000}
+      # The combined operation and status tool are exposed by default. Set
+      # EXPOSE_SEPARATE_TOOLS=true and restart to expose the separate tools.
+      - EXPOSE_SEPARATE_TOOLS=${EXPOSE_SEPARATE_TOOLS:-false}
       - PUBLIC_URL=${PUBLIC_URL:-http://localhost:${PORT:-3000}}
-      # S3 (optional — uncomment all 5 required vars together)
+      # S3 (optional — set all 5 required vars together)
       - S3_ENDPOINT=${S3_ENDPOINT}
       - S3_REGION=${S3_REGION:-us-east-1}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}
@@ -17,7 +20,7 @@ services:
       - S3_BUCKET=${S3_BUCKET}
       - S3_PUBLIC_URL=${S3_PUBLIC_URL}
       - S3_FORCE_PATH_STYLE=${S3_FORCE_PATH_STYLE}
-      # RSS (optional — uncomment all to enable)
+      # RSS (optional — set RSS_FEED_URL and required metadata to enable)
       - RSS_FEED_URL=${RSS_FEED_URL}
       - PODCAST_TITLE=${PODCAST_TITLE}
       - PODCAST_DESCRIPTION=${PODCAST_DESCRIPTION}

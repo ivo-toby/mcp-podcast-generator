@@ -1,6 +1,6 @@
 import { FFmpeg, type LoudnessMeasurement, type PcmFormat } from './ffmpeg.js';
 import path from 'path';
-import { rename } from 'fs/promises';
+import { rename, unlink } from 'fs/promises';
 
 /**
  * Working loudness level every mix part is matched to before concatenation.
@@ -72,8 +72,14 @@ export class Normalizer {
       this.tempDir,
       `finalize-correction-${Date.now()}-${Math.random().toString(36).slice(2)}.pcm`
     );
-    await this.ffmpeg.applyGainAndLimit(outputPcm, correction, LIMITER_CEILING_DB, correctedPath);
-    await rename(correctedPath, outputPcm);
+    try {
+      await this.ffmpeg.applyGainAndLimit(outputPcm, correction, LIMITER_CEILING_DB, correctedPath);
+      await rename(correctedPath, outputPcm);
+    } catch (err) {
+      // Not registered in the assembler's tempFiles — must clean up itself.
+      await unlink(correctedPath).catch(() => {});
+      throw err;
+    }
   }
 
   private needsCorrection(measurement: LoudnessMeasurement, targetLufs: number): boolean {

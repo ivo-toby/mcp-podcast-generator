@@ -310,6 +310,7 @@ backend is configured; that job returns no_storage_or_feed_configured.
 | OUTPUT_DIR | | /output | Directory where MP3 files are written |
 | TEMP_DIR | | /tmp/podcast-gen | Temporary processing directory |
 | PORT | | 3000 | HTTP server port |
+| TTS_CHUNK_TARGET_WORDS | | 450 | Target spoken-word count per Gemini TTS call (50–800). Each call produces roughly 2.5–3 minutes of audio. |
 | LOG_LEVEL | | info | Log level (info, debug, warn, error) |
 | PUBLIC_URL | | http://localhost:3000 | Download base URL; public HTTP(S) required for RSS-only mode. |
 | S3_ENDPOINT | | — | S3-compatible endpoint; set all required S3 variables together. |

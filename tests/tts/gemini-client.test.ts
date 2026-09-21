@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { formatScript, chunkDialogue, chunkMonologue } from '../../src/tts/gemini-client.js';
+import {
+  formatScript,
+  chunkDialogue,
+  chunkMonologue,
+  resolveChunkTargetWords,
+} from '../../src/tts/gemini-client.js';
 
 // ---------------------------------------------------------------------------
 // formatScript — pure function tests
@@ -54,6 +59,27 @@ describe('formatScript', () => {
     it('handles a single segment', () => {
       expect(formatScript([{ speaker: 'Alex', text: 'Just me.' }], 'dual')).toBe('Alex: Just me.');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveChunkTargetWords — TTS_CHUNK_TARGET_WORDS override with sane bounds
+// ---------------------------------------------------------------------------
+
+describe('resolveChunkTargetWords', () => {
+  it('returns the default when the env var is unset', () => {
+    expect(resolveChunkTargetWords({})).toBe(450);
+  });
+
+  it('returns a valid override', () => {
+    expect(resolveChunkTargetWords({ TTS_CHUNK_TARGET_WORDS: '300' })).toBe(300);
+  });
+
+  it('falls back to the default for non-numeric or out-of-range values', () => {
+    expect(resolveChunkTargetWords({ TTS_CHUNK_TARGET_WORDS: 'abc' })).toBe(450);
+    expect(resolveChunkTargetWords({ TTS_CHUNK_TARGET_WORDS: '10' })).toBe(450);
+    expect(resolveChunkTargetWords({ TTS_CHUNK_TARGET_WORDS: '900' })).toBe(450);
+    expect(resolveChunkTargetWords({ TTS_CHUNK_TARGET_WORDS: '-5' })).toBe(450);
   });
 });
 
@@ -332,5 +358,30 @@ describe('GeminiTTSClient', () => {
     await client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.mp3', '/tmp/test');
 
     expect(mockGetGenerativeModel.mock.calls[0][0]).toMatchObject({ model: 'gemini-custom-model' });
+  });
+
+  describe('chunk retry', () => {
+    it('retries once and succeeds when a chunk call fails transiently', async () => {
+      const { GeminiTTSClient } = await import('../../src/tts/gemini-client.js');
+      mockGenerateContent
+        .mockRejectedValueOnce(new Error('503 upstream'))
+        .mockResolvedValue(makeAudioResponse(Buffer.from('pcm').toString('base64')));
+
+      const client = new GeminiTTSClient('test-api-key', '/tmp/test');
+      await client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.mp3', '/tmp/test');
+
+      expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails after the single retry when both attempts fail', async () => {
+      const { GeminiTTSClient } = await import('../../src/tts/gemini-client.js');
+      mockGenerateContent.mockRejectedValue(new Error('429 quota'));
+
+      const client = new GeminiTTSClient('test-api-key', '/tmp/test');
+      await expect(
+        client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.mp3', '/tmp/test')
+      ).rejects.toThrow('429 quota');
+      expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+    });
   });
 });

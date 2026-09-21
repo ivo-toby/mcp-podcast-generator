@@ -18,10 +18,30 @@ export interface HostConfig {
  * pumping, clipping, "underwater" artifacts in the final minute or two).
  *
  * To stay safely inside the high-quality envelope we chunk the script so each
- * single API call produces roughly 60-90 seconds of speech. At ~165 WPM that
- * translates to ~250 spoken words per chunk.
+ * single API call produces roughly 2.5-3 minutes of speech. At ~165 WPM that
+ * translates to ~450 spoken words per chunk — about half of the hard cap, so
+ * there is headroom when the model speaks faster than the estimate.
  */
-const CHUNK_TARGET_WORDS = 250;
+const CHUNK_TARGET_WORDS = 450;
+
+/**
+ * Resolve the per-call chunk budget. TTS_CHUNK_TARGET_WORDS overrides the
+ * default; out-of-range or non-numeric values fall back to the default.
+ * Range guard: below ~100 words the per-call level variance between chunks
+ * becomes audible; above ~800 words a call risks the quality envelope.
+ */
+export function resolveChunkTargetWords(
+  env: Record<string, string | undefined> = process.env
+): number {
+  const raw = env.TTS_CHUNK_TARGET_WORDS;
+  if (!raw) return CHUNK_TARGET_WORDS;
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isNaN(parsed) || parsed < 50 || parsed > 800) {
+    log.warn({ raw }, 'Invalid TTS_CHUNK_TARGET_WORDS — using default ' + CHUNK_TARGET_WORDS);
+    return CHUNK_TARGET_WORDS;
+  }
+  return parsed;
+}
 
 export class GeminiTTSClient {
   private readonly genAI: GoogleGenerativeAI;
@@ -71,7 +91,8 @@ export class GeminiTTSClient {
       } as unknown as Parameters<typeof this.genAI.getGenerativeModel>[0]['generationConfig'],
     });
 
-    const chunks = chunkDialogue(dialogueText);
+    const chunkTargetWords = resolveChunkTargetWords();
+    const chunks = chunkDialogue(dialogueText, chunkTargetWords);
     const pcm = await this.generatePcmInChunks(modelInstance, chunks);
     await this.savePcmAsMp3(pcm, outputMp3Path, tempDir);
     log.info({ outputMp3Path }, 'TTS audio saved');
@@ -103,7 +124,8 @@ export class GeminiTTSClient {
       } as unknown as Parameters<typeof this.genAI.getGenerativeModel>[0]['generationConfig'],
     });
 
-    const chunks = chunkMonologue(text);
+    const chunkTargetWords = resolveChunkTargetWords();
+    const chunks = chunkMonologue(text, chunkTargetWords);
     const pcm = await this.generatePcmInChunks(modelInstance, chunks);
     await this.savePcmAsMp3(pcm, outputMp3Path, tempDir);
     log.info({ outputMp3Path }, 'TTS audio saved');
@@ -132,8 +154,7 @@ export class GeminiTTSClient {
     const pcmParts: Buffer[] = [];
     for (let i = 0; i < chunks.length; i++) {
       const start = Date.now();
-      const result = await modelInstance.generateContent(chunks[i]);
-      const pcm = this.extractAllPcmAudio(result);
+      const pcm = await this.synthesizeChunkWithRetry(modelInstance, chunks[i]);
       log.info(
         {
           chunk: i + 1,
@@ -148,6 +169,31 @@ export class GeminiTTSClient {
     }
 
     return Buffer.concat(pcmParts);
+  }
+
+  /**
+   * One retry per chunk call. A longer chunk failing otherwise fails the whole
+   * episode; single transient API errors (429/5xx, truncated responses) are
+   * common enough that an immediate retry is cheap insurance.
+   */
+  private async synthesizeChunkWithRetry(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    modelInstance: any,
+    chunk: string
+  ): Promise<Buffer> {
+    try {
+      return await this.synthesizeChunk(modelInstance, chunk);
+    } catch (firstErr) {
+      log.warn({ err: firstErr }, 'Chunk TTS call failed — retrying once');
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      return this.synthesizeChunk(modelInstance, chunk);
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async synthesizeChunk(modelInstance: any, chunk: string): Promise<Buffer> {
+    const result = await modelInstance.generateContent(chunk);
+    return this.extractAllPcmAudio(result);
   }
 
   /**

@@ -185,11 +185,30 @@ describe('chunkMonologue', () => {
 // GeminiTTSClient — mock the Google Generative AI SDK
 // ---------------------------------------------------------------------------
 
-const { mockGenerateContent, mockGetGenerativeModel } = vi.hoisted(() => {
-  const mockGenerateContent = vi.fn();
-  const mockGetGenerativeModel = vi.fn(() => ({ generateContent: mockGenerateContent }));
-  return { mockGenerateContent, mockGetGenerativeModel };
-});
+const { mockGenerateContent, mockGetGenerativeModel, mockExec, mockWriteFile, mockReadFile } =
+  vi.hoisted(() => {
+    const mockGenerateContent = vi.fn();
+    const mockGetGenerativeModel = vi.fn(() => ({ generateContent: mockGenerateContent }));
+    const mockExec = vi.fn(
+      (_cmd: string, cb: (e: null, r: { stdout: string; stderr: string }) => void) => {
+        if (_cmd.includes('loudnorm')) {
+          const json = JSON.stringify({
+            input_i: '-23.50',
+            input_tp: '-2.00',
+            input_lra: '7.00',
+            input_thresh: '-33.50',
+            target_offset: '0.50',
+          });
+          cb(null, { stdout: '', stderr: `ffmpeg output\n${json}\n` });
+        } else {
+          cb(null, { stdout: '', stderr: '' });
+        }
+      }
+    );
+    const mockWriteFile = vi.fn().mockResolvedValue(undefined);
+    const mockReadFile = vi.fn().mockResolvedValue(Buffer.from('leveled-pcm'));
+    return { mockGenerateContent, mockGetGenerativeModel, mockExec, mockWriteFile, mockReadFile };
+  });
 
 vi.mock('@google/generative-ai', () => ({
   GoogleGenerativeAI: vi.fn(function() { return ({
@@ -198,7 +217,8 @@ vi.mock('@google/generative-ai', () => ({
 }));
 
 vi.mock('fs/promises', () => ({
-  writeFile: vi.fn().mockResolvedValue(undefined),
+  writeFile: mockWriteFile,
+  readFile: mockReadFile,
   unlink: vi.fn().mockResolvedValue(undefined),
   mkdir: vi.fn().mockResolvedValue(undefined),
   copyFile: vi.fn().mockResolvedValue(undefined),
@@ -206,9 +226,7 @@ vi.mock('fs/promises', () => ({
 }));
 
 vi.mock('child_process', () => ({
-  exec: vi.fn((_cmd: string, cb: (e: null, r: { stdout: string; stderr: string }) => void) =>
-    cb(null, { stdout: '', stderr: '' })
-  ),
+  exec: mockExec,
 }));
 
 describe('GeminiTTSClient', () => {
@@ -236,7 +254,7 @@ describe('GeminiTTSClient', () => {
     );
 
     const client = new GeminiTTSClient('test-api-key', '/tmp/test');
-    await client.generateSingleHost('Hello world', { name: 'Alex', voice: 'Charon' }, '/tmp/out.mp3', '/tmp/test');
+    await client.generateSingleHost('Hello world', { name: 'Alex', voice: 'Charon' }, '/tmp/out.pcm', '/tmp/test');
 
     expect(mockGetGenerativeModel).toHaveBeenCalledOnce();
     const config = mockGetGenerativeModel.mock.calls[0][0] as {
@@ -260,7 +278,7 @@ describe('GeminiTTSClient', () => {
       { name: 'Alex', voice: 'Charon' },
       { name: 'Sam', voice: 'Puck' },
     ];
-    await client.generateDualHost('Alex: Hi\nSam: Hello', hosts, '/tmp/out.mp3', '/tmp/test');
+    await client.generateDualHost('Alex: Hi\nSam: Hello', hosts, '/tmp/out.pcm', '/tmp/test');
 
     const config = mockGetGenerativeModel.mock.calls[0][0] as {
       generationConfig: {
@@ -280,7 +298,7 @@ describe('GeminiTTSClient', () => {
     const client = new GeminiTTSClient('test-api-key', '/tmp/test');
 
     await expect(
-      client.generateSingleHost('   \n  \n ', { name: 'Alex', voice: 'Kore' }, '/tmp/out.mp3', '/tmp/test')
+      client.generateSingleHost('   \n  \n ', { name: 'Alex', voice: 'Kore' }, '/tmp/out.pcm', '/tmp/test')
     ).rejects.toThrow(/empty script/i);
 
     // Must NOT have called the TTS API or written anything with empty PCM
@@ -293,7 +311,7 @@ describe('GeminiTTSClient', () => {
 
     const client = new GeminiTTSClient('test-api-key', '/tmp/test');
     await expect(
-      client.generateSingleHost('Hi', { name: 'Alex', voice: 'Charon' }, '/tmp/out.mp3', '/tmp/test')
+      client.generateSingleHost('Hi', { name: 'Alex', voice: 'Charon' }, '/tmp/out.pcm', '/tmp/test')
     ).rejects.toThrow('Gemini TTS returned no content parts');
   });
 
@@ -305,7 +323,7 @@ describe('GeminiTTSClient', () => {
 
     const client = new GeminiTTSClient('test-api-key', '/tmp/test');
     await expect(
-      client.generateSingleHost('Hi', { name: 'Alex', voice: 'Charon' }, '/tmp/out.mp3', '/tmp/test')
+      client.generateSingleHost('Hi', { name: 'Alex', voice: 'Charon' }, '/tmp/out.pcm', '/tmp/test')
     ).rejects.toThrow('Gemini TTS returned no audio data in response parts');
   });
 
@@ -315,11 +333,11 @@ describe('GeminiTTSClient', () => {
       makeAudioResponse(Buffer.from('pcm-data').toString('base64'))
     );
 
-    // 8 paragraphs of 200 words each = 1600 words; 250-word budget -> >1 chunk
+    // 8 paragraphs of 200 words each = 1600 words; 450-word budget -> >1 chunk
     const paragraph = 'word '.repeat(200).trim() + '.';
     const longText = Array(8).fill(paragraph).join('\n\n');
     const client = new GeminiTTSClient('test-api-key', '/tmp/test');
-    await client.generateSingleHost(longText, { name: 'Alex', voice: 'Kore' }, '/tmp/out.mp3', '/tmp/test');
+    await client.generateSingleHost(longText, { name: 'Alex', voice: 'Kore' }, '/tmp/out.pcm', '/tmp/test');
 
     // Should call the TTS API multiple times rather than blasting the whole script in one go
     expect(mockGenerateContent.mock.calls.length).toBeGreaterThan(1);
@@ -344,8 +362,37 @@ describe('GeminiTTSClient', () => {
 
     const client = new GeminiTTSClient('test-api-key', '/tmp/test');
     // Should not throw — both parts are accepted and concatenated
-    await client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.mp3', '/tmp/test');
+    await client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.pcm', '/tmp/test');
     expect(mockGenerateContent).toHaveBeenCalledOnce();
+  });
+
+  it('level-matches each chunk with a static gain and writes raw PCM (no MP3 in TTS)', async () => {
+    const { GeminiTTSClient } = await import('../../src/tts/gemini-client.js');
+    mockGenerateContent.mockResolvedValue(
+      makeAudioResponse(Buffer.from('pcm-data').toString('base64'))
+    );
+
+    const client = new GeminiTTSClient('test-api-key', '/tmp/test');
+    await client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.pcm', '/tmp/test');
+
+    const cmds = mockExec.mock.calls.map((c) => c[0] as string);
+
+    // One loudnorm measurement per chunk, on the raw s16le PCM Gemini returns
+    const measureCmds = cmds.filter((c) => c.includes('loudnorm'));
+    expect(measureCmds).toHaveLength(1);
+    expect(measureCmds[0]).toContain('-f s16le');
+
+    // Static gain to the -20 LUFS working level: -23.5 measured → +3.5 dB
+    const gainCmds = cmds.filter((c) => c.includes('volume='));
+    expect(gainCmds).toHaveLength(1);
+    expect(gainCmds[0]).toContain('volume=3.5dB');
+    expect(gainCmds[0]).toContain('-f f32le');
+
+    // No lossy encode inside the TTS client — the assembler does the single encode
+    expect(cmds.some((c) => c.includes('libmp3lame'))).toBe(false);
+
+    // Output is the raw PCM buffer, written to the requested .pcm path
+    expect(mockWriteFile).toHaveBeenCalledWith('/tmp/out.pcm', Buffer.from('leveled-pcm'));
   });
 
   it('uses a custom model when specified', async () => {
@@ -355,7 +402,7 @@ describe('GeminiTTSClient', () => {
     );
 
     const client = new GeminiTTSClient('key', '/tmp/test', 'gemini-custom-model');
-    await client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.mp3', '/tmp/test');
+    await client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.pcm', '/tmp/test');
 
     expect(mockGetGenerativeModel.mock.calls[0][0]).toMatchObject({ model: 'gemini-custom-model' });
   });
@@ -368,7 +415,7 @@ describe('GeminiTTSClient', () => {
         .mockResolvedValue(makeAudioResponse(Buffer.from('pcm').toString('base64')));
 
       const client = new GeminiTTSClient('test-api-key', '/tmp/test');
-      await client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.mp3', '/tmp/test');
+      await client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.pcm', '/tmp/test');
 
       expect(mockGenerateContent).toHaveBeenCalledTimes(2);
     });
@@ -379,7 +426,7 @@ describe('GeminiTTSClient', () => {
 
       const client = new GeminiTTSClient('test-api-key', '/tmp/test');
       await expect(
-        client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.mp3', '/tmp/test')
+        client.generateSingleHost('Hi', { name: 'Alex', voice: 'Kore' }, '/tmp/out.pcm', '/tmp/test')
       ).rejects.toThrow('429 quota');
       expect(mockGenerateContent).toHaveBeenCalledTimes(2);
     });

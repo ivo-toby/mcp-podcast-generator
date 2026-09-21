@@ -1,58 +1,124 @@
 import { exec as execCb } from 'child_process';
 import { promisify } from 'util';
-import { writeFile, unlink, copyFile } from 'fs/promises';
+import { writeFile, readFile, unlink, copyFile, stat } from 'fs/promises';
 import path from 'path';
 
 const exec = promisify(execCb);
 
-export interface NormalizationMeasurement {
+export interface LoudnessMeasurement {
   inputI: number;
   inputTp: number;
   inputLra: number;
   inputThresh: number;
-  offset: number;
 }
 
+export type PcmFormat = 's16le' | 'f32le';
+
+/**
+ * Sample format of the audio pipeline: 24kHz mono.
+ * Intermediates are float32 PCM so gain stages cannot clip; the only integer
+ * PCM (and the only lossy encode) is the final MP3 write.
+ */
+export const PCM_SAMPLE_RATE = 24000;
+
 export class FFmpeg {
-  constructor(private readonly tempDir: string) {}
+  private pcmInputArgs(format: PcmFormat): string {
+    return `-f ${format} -ar ${PCM_SAMPLE_RATE} -ac 1`;
+  }
 
   /**
-   * Convert raw PCM (24kHz, 16-bit, mono) to MP3.
-   * This is the format Gemini TTS outputs.
+   * Encode raw PCM to MP3. This is the pipeline's single lossy encode —
+   * every stage before it works on raw PCM.
    */
-  async convertPcmToMp3(pcmPath: string, mp3Path: string): Promise<void> {
+  async convertPcmToMp3(
+    pcmPath: string,
+    mp3Path: string,
+    inputFormat: PcmFormat = 'f32le'
+  ): Promise<void> {
     await exec(
-      `ffmpeg -y -f s16le -ar 24000 -ac 1 -i "${pcmPath}" -acodec libmp3lame -ab 192k "${mp3Path}"`
+      `ffmpeg -y ${this.pcmInputArgs(inputFormat)} -i "${pcmPath}" -acodec libmp3lame -ab 192k "${mp3Path}"`
     );
   }
 
   /**
-   * Concatenate multiple MP3 files into one, re-encoding to avoid frame boundary issues.
+   * Decode any audio file (mp3, wav, ...) to raw f32le mono PCM at the
+   * pipeline sample rate, so all mixing happens in one float domain.
    */
-  async concatenate(inputPaths: string[], outputPath: string): Promise<void> {
-    if (inputPaths.length === 0) {
-      throw new Error('No input files to concatenate');
-    }
-    if (inputPaths.length === 1) {
-      await copyFile(inputPaths[0], outputPath);
-      return;
-    }
-
-    const listPath = path.join(this.tempDir, `concat-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
-    const fileList = inputPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join('\n');
-    await writeFile(listPath, fileList, 'utf8');
-
-    try {
-      await exec(
-        `ffmpeg -y -f concat -safe 0 -i "${listPath}" -acodec libmp3lame -ab 192k "${outputPath}"`
-      );
-    } finally {
-      await unlink(listPath).catch(() => {});
-    }
+  async decodeToPcm32(inputPath: string, outputPath: string): Promise<void> {
+    await exec(
+      `ffmpeg -y -i "${inputPath}" -vn -ac 1 -ar ${PCM_SAMPLE_RATE} -f f32le -c:a pcm_f32le "${outputPath}"`
+    );
   }
 
   /**
-   * Apply fade-in and/or fade-out to an audio file.
+   * Measure EBU R128 loudness of a raw PCM file (loudnorm first pass).
+   */
+  async measureLoudness(
+    inputPath: string,
+    inputFormat: PcmFormat = 'f32le'
+  ): Promise<LoudnessMeasurement> {
+    const { stderr } = await exec(
+      `ffmpeg -hide_banner ${this.pcmInputArgs(inputFormat)} -i "${inputPath}" -af loudnorm=I=-16:TP=-1:LRA=11:print_format=json -f null /dev/null`
+    ).catch((err) => {
+      // ffmpeg exits non-zero for -f null, but stderr has the output
+      return { stdout: err.stdout as string, stderr: err.stderr as string };
+    });
+
+    const jsonMatch = stderr.match(/\{[\s\S]*?"input_thresh"[\s\S]*?\}/);
+    if (!jsonMatch) {
+      throw new Error(`Could not parse loudnorm measurement from ffmpeg output:\n${stderr}`);
+    }
+
+    const parsed = JSON.parse(jsonMatch[0]) as {
+      input_i: string;
+      input_tp: string;
+      input_lra: string;
+      input_thresh: string;
+    };
+
+    return {
+      inputI: parseFloat(parsed.input_i),
+      inputTp: parseFloat(parsed.input_tp),
+      inputLra: parseFloat(parsed.input_lra),
+      inputThresh: parseFloat(parsed.input_thresh),
+    };
+  }
+
+  /**
+   * Apply static gain to raw PCM, outputting f32le. Static gain only — no
+   * dynamic processing, so the material's loudness range is preserved.
+   */
+  async applyGain(
+    inputPath: string,
+    gainDb: number,
+    outputPath: string,
+    inputFormat: PcmFormat = 'f32le'
+  ): Promise<void> {
+    await exec(
+      `ffmpeg -y ${this.pcmInputArgs(inputFormat)} -i "${inputPath}" -af "volume=${gainDb}dB" -f f32le -c:a pcm_f32le "${outputPath}"`
+    );
+  }
+
+  /**
+   * Static gain followed by a lookahead limiter ceiling. The limiter only
+   * touches isolated peaks above the ceiling, unlike broadband dynamic
+   * normalization which compresses everything continuously.
+   */
+  async applyGainAndLimit(
+    inputPath: string,
+    gainDb: number,
+    ceilingDb: number,
+    outputPath: string
+  ): Promise<void> {
+    // alimiter takes a linear amplitude; level=false disables its auto-level.
+    const limitAmp = Math.pow(10, ceilingDb / 20).toFixed(4);
+    await exec(
+      `ffmpeg -y ${this.pcmInputArgs('f32le')} -i "${inputPath}" -af "volume=${gainDb}dB,alimiter=limit=${limitAmp}:attack=5:release=50:level=false" -f f32le -c:a pcm_f32le "${outputPath}"`
+    );
+  }
+
+  /**
+   * Apply fade-in and/or fade-out to raw f32le PCM.
    */
   async addFade(
     inputPath: string,
@@ -72,76 +138,44 @@ export class FFmpeg {
     }
 
     if (fadeOutSecs > 0) {
-      const duration = await this.getDurationSeconds(inputPath);
+      const duration = await this.pcmDurationSeconds(inputPath);
       const start = Math.max(0, duration - fadeOutSecs);
       filters.push(`afade=t=out:st=${start.toFixed(3)}:d=${fadeOutSecs}`);
     }
 
     const filterStr = filters.join(',');
-    await exec(`ffmpeg -y -i "${inputPath}" -af "${filterStr}" -acodec libmp3lame -ab 192k "${outputPath}"`);
+    await exec(
+      `ffmpeg -y ${this.pcmInputArgs('f32le')} -i "${inputPath}" -af "${filterStr}" -f f32le -c:a pcm_f32le "${outputPath}"`
+    );
   }
 
   /**
-   * Measure loudness for EBU R128 normalization (first pass).
+   * Concatenate same-format raw PCM files by byte concatenation. All parts
+   * must already be f32le mono PCM — format mismatches would corrupt audio.
    */
-  async measureLoudness(inputPath: string): Promise<NormalizationMeasurement> {
-    // ffmpeg writes the loudnorm JSON to stderr
-    const { stderr } = await exec(
-      `ffmpeg -i "${inputPath}" -af loudnorm=I=-16:TP=-1:LRA=11:print_format=json -f null /dev/null`
-    ).catch((err) => {
-      // ffmpeg exits non-zero for -f null, but stderr has the output
-      return { stdout: err.stdout as string, stderr: err.stderr as string };
-    });
-
-    // Extract JSON block from stderr
-    const jsonMatch = stderr.match(/\{[\s\S]*?"input_thresh"[\s\S]*?\}/);
-    if (!jsonMatch) {
-      throw new Error(`Could not parse loudnorm measurement from ffmpeg output:\n${stderr}`);
+  async concatPcm(inputPaths: string[], outputPath: string): Promise<void> {
+    if (inputPaths.length === 0) {
+      throw new Error('No input files to concatenate');
+    }
+    if (inputPaths.length === 1) {
+      await copyFile(inputPaths[0], outputPath);
+      return;
     }
 
-    const parsed = JSON.parse(jsonMatch[0]) as {
-      input_i: string;
-      input_tp: string;
-      input_lra: string;
-      input_thresh: string;
-      target_offset: string;
-    };
-
-    return {
-      inputI: parseFloat(parsed.input_i),
-      inputTp: parseFloat(parsed.input_tp),
-      inputLra: parseFloat(parsed.input_lra),
-      inputThresh: parseFloat(parsed.input_thresh),
-      offset: parseFloat(parsed.target_offset),
-    };
+    const parts = await Promise.all(inputPaths.map((p) => readFile(p)));
+    await writeFile(outputPath, Buffer.concat(parts));
   }
 
   /**
-   * Apply EBU R128 loudness normalization (second pass using measured values).
+   * Duration of a raw PCM file, derived from file size (no container header).
    */
-  async normalizeLoudness(
-    inputPath: string,
-    outputPath: string,
-    targetLufs: number,
-    measurement: NormalizationMeasurement
-  ): Promise<void> {
-    const filter = [
-      `loudnorm=I=${targetLufs}`,
-      `TP=-1`,
-      `LRA=11`,
-      `measured_I=${measurement.inputI}`,
-      `measured_TP=${measurement.inputTp}`,
-      `measured_LRA=${measurement.inputLra}`,
-      `measured_thresh=${measurement.inputThresh}`,
-      `offset=${measurement.offset}`,
-      `linear=true`,
-    ].join(':');
-
-    await exec(`ffmpeg -y -i "${inputPath}" -af "${filter}" -acodec libmp3lame -ab 192k "${outputPath}"`);
+  async pcmDurationSeconds(filePath: string, bytesPerSample = 4): Promise<number> {
+    const { size } = await stat(filePath);
+    return size / (bytesPerSample * PCM_SAMPLE_RATE);
   }
 
   /**
-   * Get the duration of an audio file in seconds.
+   * Get the duration of a container audio file (e.g. MP3) in seconds.
    */
   async getDurationSeconds(filePath: string): Promise<number> {
     const { stdout } = await exec(

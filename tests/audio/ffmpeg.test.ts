@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { NormalizationMeasurement } from '../../src/audio/ffmpeg.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process — must happen before any module that imports it
@@ -10,13 +9,17 @@ vi.mock('child_process', () => ({ exec: mockExec }));
 
 // Mock fs/promises
 const mockWriteFile = vi.fn().mockResolvedValue(undefined);
+const mockReadFile = vi.fn().mockResolvedValue(Buffer.alloc(0));
 const mockUnlink = vi.fn().mockResolvedValue(undefined);
 const mockCopyFile = vi.fn().mockResolvedValue(undefined);
+const mockStat = vi.fn().mockResolvedValue({ size: 24000 * 4 * 10 }); // 10s of f32le
 
 vi.mock('fs/promises', () => ({
   writeFile: mockWriteFile,
+  readFile: mockReadFile,
   unlink: mockUnlink,
   copyFile: mockCopyFile,
+  stat: mockStat,
   mkdir: vi.fn().mockResolvedValue(undefined),
   rename: vi.fn().mockResolvedValue(undefined),
 }));
@@ -52,6 +55,7 @@ describe('FFmpeg', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mockStat.mockResolvedValue({ size: 24000 * 4 * 10 });
     ({ FFmpeg } = await import('../../src/audio/ffmpeg.js'));
   });
 
@@ -60,153 +64,48 @@ describe('FFmpeg', () => {
   // -------------------------------------------------------------------------
 
   describe('convertPcmToMp3', () => {
-    it('calls ffmpeg with correct PCM-to-MP3 arguments', async () => {
+    it('defaults to f32le PCM input', async () => {
       execOk();
-      const ffmpeg = new FFmpeg('/tmp/test');
+      const ffmpeg = new FFmpeg();
       await ffmpeg.convertPcmToMp3('/tmp/input.pcm', '/tmp/output.mp3');
 
       const cmd: string = mockExec.mock.calls[0][0];
-      expect(cmd).toContain('-f s16le');
+      expect(cmd).toContain('-f f32le');
       expect(cmd).toContain('-ar 24000');
       expect(cmd).toContain('-ac 1');
       expect(cmd).toContain('libmp3lame');
       expect(cmd).toContain('"/tmp/input.pcm"');
       expect(cmd).toContain('"/tmp/output.mp3"');
     });
-  });
 
-  // -------------------------------------------------------------------------
-  // concatenate
-  // -------------------------------------------------------------------------
-
-  describe('concatenate', () => {
-    it('throws when given an empty array', async () => {
-      const ffmpeg = new FFmpeg('/tmp/test');
-      await expect(ffmpeg.concatenate([], '/tmp/out.mp3')).rejects.toThrow(
-        'No input files to concatenate'
-      );
-    });
-
-    it('copies directly when only one file is provided', async () => {
-      const ffmpeg = new FFmpeg('/tmp/test');
-      await ffmpeg.concatenate(['/tmp/a.mp3'], '/tmp/out.mp3');
-
-      expect(mockCopyFile).toHaveBeenCalledWith('/tmp/a.mp3', '/tmp/out.mp3');
-      expect(mockExec).not.toHaveBeenCalled();
-    });
-
-    it('writes concat list and runs ffmpeg for multiple files', async () => {
+    it('accepts s16le PCM input', async () => {
       execOk();
-      const ffmpeg = new FFmpeg('/tmp/test');
-      await ffmpeg.concatenate(['/tmp/a.mp3', '/tmp/b.mp3'], '/tmp/out.mp3');
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.convertPcmToMp3('/tmp/input.pcm', '/tmp/output.mp3', 's16le');
 
-      // Should have written the list file
-      expect(mockWriteFile).toHaveBeenCalledOnce();
-      const [, listContent] = mockWriteFile.mock.calls[0] as [string, string, string];
-      expect(listContent).toContain("file '/tmp/a.mp3'");
-      expect(listContent).toContain("file '/tmp/b.mp3'");
-
-      // Should have called ffmpeg with concat demuxer
       const cmd: string = mockExec.mock.calls[0][0];
-      expect(cmd).toContain('-f concat');
-      expect(cmd).toContain('-safe 0');
-      expect(cmd).toContain('libmp3lame');
-
-      // Should clean up the list file
-      expect(mockUnlink).toHaveBeenCalledOnce();
-    });
-
-    it('escapes single quotes in file paths', async () => {
-      execOk();
-      const ffmpeg = new FFmpeg('/tmp/test');
-      await ffmpeg.concatenate(["/tmp/it's a file.mp3", '/tmp/b.mp3'], '/tmp/out.mp3');
-
-      const [, listContent] = mockWriteFile.mock.calls[0] as [string, string, string];
-      expect(listContent).toContain("file '/tmp/it'\\''s a file.mp3'");
-    });
-
-    it('cleans up list file even when ffmpeg fails', async () => {
-      execFail();
-      const ffmpeg = new FFmpeg('/tmp/test');
-      await expect(
-        ffmpeg.concatenate(['/tmp/a.mp3', '/tmp/b.mp3'], '/tmp/out.mp3')
-      ).rejects.toThrow();
-
-      expect(mockUnlink).toHaveBeenCalledOnce();
+      expect(cmd).toContain('-f s16le');
+      expect(cmd).not.toContain('-f f32le');
     });
   });
 
   // -------------------------------------------------------------------------
-  // addFade
+  // decodeToPcm32
   // -------------------------------------------------------------------------
 
-  describe('addFade', () => {
-    it('copies file when both fades are 0', async () => {
-      const ffmpeg = new FFmpeg('/tmp/test');
-      await ffmpeg.addFade('/tmp/in.mp3', '/tmp/out.mp3', 0, 0);
-
-      expect(mockCopyFile).toHaveBeenCalledWith('/tmp/in.mp3', '/tmp/out.mp3');
-      expect(mockExec).not.toHaveBeenCalled();
-    });
-
-    it('applies fade-in filter when only fadeIn > 0', async () => {
+  describe('decodeToPcm32', () => {
+    it('decodes any input to f32le mono 24kHz', async () => {
       execOk();
-      const ffmpeg = new FFmpeg('/tmp/test');
-      await ffmpeg.addFade('/tmp/in.mp3', '/tmp/out.mp3', 3, 0);
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.decodeToPcm32('/tmp/music.mp3', '/tmp/out.pcm');
 
       const cmd: string = mockExec.mock.calls[0][0];
-      expect(cmd).toContain('afade=t=in:st=0:d=3');
-      expect(cmd).not.toContain('afade=t=out');
-    });
-
-    it('applies fade-out filter when only fadeOut > 0', async () => {
-      // First exec: ffprobe (getDurationSeconds)
-      mockExec.mockImplementationOnce(
-        (_cmd: string, cb: (e: null, r: { stdout: string; stderr: string }) => void) =>
-          cb(null, { stdout: JSON.stringify({ streams: [{ duration: '120.5' }] }), stderr: '' })
-      );
-      // Second exec: ffmpeg fade
-      execOk();
-
-      const ffmpeg = new FFmpeg('/tmp/test');
-      await ffmpeg.addFade('/tmp/in.mp3', '/tmp/out.mp3', 0, 4);
-
-      const cmd: string = mockExec.mock.calls[1][0];
-      expect(cmd).toContain('afade=t=out');
-      expect(cmd).toContain('d=4');
-      expect(cmd).not.toContain('afade=t=in');
-    });
-
-    it('applies both fade-in and fade-out when both > 0', async () => {
-      // First exec: ffprobe
-      mockExec.mockImplementationOnce(
-        (_cmd: string, cb: (e: null, r: { stdout: string; stderr: string }) => void) =>
-          cb(null, { stdout: JSON.stringify({ streams: [{ duration: '60.0' }] }), stderr: '' })
-      );
-      // Second exec: ffmpeg
-      execOk();
-
-      const ffmpeg = new FFmpeg('/tmp/test');
-      await ffmpeg.addFade('/tmp/in.mp3', '/tmp/out.mp3', 2, 3);
-
-      const cmd: string = mockExec.mock.calls[1][0];
-      expect(cmd).toContain('afade=t=in:st=0:d=2');
-      expect(cmd).toContain('afade=t=out');
-    });
-
-    it('clamps fade-out start to 0 when duration < fade duration', async () => {
-      mockExec.mockImplementationOnce(
-        (_cmd: string, cb: (e: null, r: { stdout: string; stderr: string }) => void) =>
-          cb(null, { stdout: JSON.stringify({ streams: [{ duration: '2.0' }] }), stderr: '' })
-      );
-      execOk();
-
-      const ffmpeg = new FFmpeg('/tmp/test');
-      await ffmpeg.addFade('/tmp/in.mp3', '/tmp/out.mp3', 0, 5);
-
-      const cmd: string = mockExec.mock.calls[1][0];
-      // start = max(0, 2 - 5) = 0
-      expect(cmd).toContain('st=0.000');
+      expect(cmd).toContain('-i "/tmp/music.mp3"');
+      expect(cmd).toContain('-ac 1');
+      expect(cmd).toContain('-ar 24000');
+      expect(cmd).toContain('-f f32le');
+      expect(cmd).toContain('pcm_f32le');
+      expect(cmd).toContain('"/tmp/out.pcm"');
     });
   });
 
@@ -219,60 +118,186 @@ describe('FFmpeg', () => {
       // measureLoudness uses .catch() internally, simulate ffmpeg non-zero exit
       execFail('', `some ffmpeg output\n${LOUDNORM_JSON}\nmore output`);
 
-      const ffmpeg = new FFmpeg('/tmp/test');
-      const result = await ffmpeg.measureLoudness('/tmp/in.mp3');
+      const ffmpeg = new FFmpeg();
+      const result = await ffmpeg.measureLoudness('/tmp/in.pcm');
 
       expect(result.inputI).toBe(-23.5);
       expect(result.inputTp).toBe(-2.0);
       expect(result.inputLra).toBe(7.0);
       expect(result.inputThresh).toBe(-33.5);
-      expect(result.offset).toBe(0.5);
     });
 
-    it('also works when ffmpeg exits cleanly (stdout path)', async () => {
+    it('passes raw PCM input args for the measured format', async () => {
       execOk('', `\n${LOUDNORM_JSON}\n`);
 
-      const ffmpeg = new FFmpeg('/tmp/test');
-      const result = await ffmpeg.measureLoudness('/tmp/in.mp3');
-      expect(result.inputI).toBe(-23.5);
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.measureLoudness('/tmp/in.pcm', 's16le');
+
+      const cmd: string = mockExec.mock.calls[0][0];
+      expect(cmd).toContain('-f s16le -ar 24000 -ac 1 -i "/tmp/in.pcm"');
+      expect(cmd).toContain('loudnorm');
+      expect(cmd).toContain('print_format=json');
     });
 
     it('throws when stderr contains no loudnorm JSON block', async () => {
       execFail('', 'Error: file not found');
 
-      const ffmpeg = new FFmpeg('/tmp/test');
-      await expect(ffmpeg.measureLoudness('/tmp/in.mp3')).rejects.toThrow(
+      const ffmpeg = new FFmpeg();
+      await expect(ffmpeg.measureLoudness('/tmp/in.pcm')).rejects.toThrow(
         'Could not parse loudnorm measurement'
       );
     });
   });
 
   // -------------------------------------------------------------------------
-  // normalizeLoudness
+  // applyGain
   // -------------------------------------------------------------------------
 
-  describe('normalizeLoudness', () => {
-    it('builds a correct loudnorm filter string', async () => {
+  describe('applyGain', () => {
+    it('applies a static volume gain and outputs f32le', async () => {
       execOk();
-      const ffmpeg = new FFmpeg('/tmp/test');
-      const measurement: NormalizationMeasurement = {
-        inputI: -23.5,
-        inputTp: -2.0,
-        inputLra: 7.0,
-        inputThresh: -33.5,
-        offset: 0.5,
-      };
-
-      await ffmpeg.normalizeLoudness('/tmp/in.mp3', '/tmp/out.mp3', -16, measurement);
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.applyGain('/tmp/in.pcm', 3.25, '/tmp/out.pcm');
 
       const cmd: string = mockExec.mock.calls[0][0];
-      expect(cmd).toContain('loudnorm=I=-16');
-      expect(cmd).toContain('measured_I=-23.5');
-      expect(cmd).toContain('measured_TP=-2');
-      expect(cmd).toContain('measured_LRA=7');
-      expect(cmd).toContain('linear=true');
-      expect(cmd).toContain('"/tmp/in.mp3"');
-      expect(cmd).toContain('"/tmp/out.mp3"');
+      expect(cmd).toContain('-af "volume=3.25dB"');
+      expect(cmd).toContain('-f f32le -c:a pcm_f32le');
+      expect(cmd).not.toContain('loudnorm');
+    });
+
+    it('supports s16le input format', async () => {
+      execOk();
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.applyGain('/tmp/in.pcm', -2, '/tmp/out.pcm', 's16le');
+
+      const cmd: string = mockExec.mock.calls[0][0];
+      expect(cmd).toContain('-f s16le');
+      expect(cmd).toContain('volume=-2dB');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // applyGainAndLimit
+  // -------------------------------------------------------------------------
+
+  describe('applyGainAndLimit', () => {
+    it('chains static gain with a lookahead limiter at the ceiling', async () => {
+      execOk();
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.applyGainAndLimit('/tmp/in.pcm', 4, -1.5, '/tmp/out.pcm');
+
+      const cmd: string = mockExec.mock.calls[0][0];
+      expect(cmd).toContain('volume=4dB');
+      // -1.5 dBFS as linear amplitude
+      expect(cmd).toContain('alimiter=limit=0.8414');
+      expect(cmd).toContain('level=false');
+      expect(cmd).toContain('attack=5');
+      expect(cmd).toContain('release=50');
+      expect(cmd).not.toContain('loudnorm');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // addFade
+  // -------------------------------------------------------------------------
+
+  describe('addFade', () => {
+    it('copies file when both fades are 0', async () => {
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.addFade('/tmp/in.pcm', '/tmp/out.pcm', 0, 0);
+
+      expect(mockCopyFile).toHaveBeenCalledWith('/tmp/in.pcm', '/tmp/out.pcm');
+      expect(mockExec).not.toHaveBeenCalled();
+    });
+
+    it('applies fade-in filter when only fadeIn > 0', async () => {
+      execOk();
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.addFade('/tmp/in.pcm', '/tmp/out.pcm', 3, 0);
+
+      const cmd: string = mockExec.mock.calls[0][0];
+      expect(cmd).toContain('afade=t=in:st=0:d=3');
+      expect(cmd).not.toContain('afade=t=out');
+    });
+
+    it('applies fade-out based on PCM file size duration', async () => {
+      execOk();
+      // 10s of f32le PCM; fade-out of 4s starts at 6s
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.addFade('/tmp/in.pcm', '/tmp/out.pcm', 0, 4);
+
+      const cmd: string = mockExec.mock.calls[0][0];
+      expect(cmd).toContain('afade=t=out:st=6.000:d=4');
+      expect(cmd).not.toContain('afade=t=in');
+    });
+
+    it('applies both fade-in and fade-out when both > 0', async () => {
+      execOk();
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.addFade('/tmp/in.pcm', '/tmp/out.pcm', 2, 3);
+
+      const cmd: string = mockExec.mock.calls[0][0];
+      expect(cmd).toContain('afade=t=in:st=0:d=2');
+      expect(cmd).toContain('afade=t=out:st=7.000:d=3');
+    });
+
+    it('clamps fade-out start to 0 when duration < fade duration', async () => {
+      execOk();
+      mockStat.mockResolvedValue({ size: 24000 * 4 * 2 }); // 2s of audio
+
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.addFade('/tmp/in.pcm', '/tmp/out.pcm', 0, 5);
+
+      const cmd: string = mockExec.mock.calls[0][0];
+      // start = max(0, 2 - 5) = 0
+      expect(cmd).toContain('st=0.000');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // concatPcm
+  // -------------------------------------------------------------------------
+
+  describe('concatPcm', () => {
+    it('throws when given an empty array', async () => {
+      const ffmpeg = new FFmpeg();
+      await expect(ffmpeg.concatPcm([], '/tmp/out.pcm')).rejects.toThrow(
+        'No input files to concatenate'
+      );
+    });
+
+    it('copies directly when only one file is provided', async () => {
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.concatPcm(['/tmp/a.pcm'], '/tmp/out.pcm');
+
+      expect(mockCopyFile).toHaveBeenCalledWith('/tmp/a.pcm', '/tmp/out.pcm');
+      expect(mockReadFile).not.toHaveBeenCalled();
+    });
+
+    it('byte-concatenates multiple PCM files', async () => {
+      mockReadFile
+        .mockResolvedValueOnce(Buffer.from([1, 2]))
+        .mockResolvedValueOnce(Buffer.from([3, 4]));
+
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.concatPcm(['/tmp/a.pcm', '/tmp/b.pcm'], '/tmp/out.pcm');
+
+      expect(mockWriteFile).toHaveBeenCalledWith('/tmp/out.pcm', Buffer.from([1, 2, 3, 4]));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // pcmDurationSeconds
+  // -------------------------------------------------------------------------
+
+  describe('pcmDurationSeconds', () => {
+    it('derives duration from file size', async () => {
+      mockStat.mockResolvedValue({ size: 24000 * 4 * 12.5 });
+
+      const ffmpeg = new FFmpeg();
+      const duration = await ffmpeg.pcmDurationSeconds('/tmp/in.pcm');
+
+      expect(duration).toBe(12.5);
     });
   });
 
@@ -284,7 +309,7 @@ describe('FFmpeg', () => {
     it('parses duration from ffprobe JSON output', async () => {
       execOk(JSON.stringify({ streams: [{ duration: '245.3' }] }));
 
-      const ffmpeg = new FFmpeg('/tmp/test');
+      const ffmpeg = new FFmpeg();
       const duration = await ffmpeg.getDurationSeconds('/tmp/test.mp3');
 
       expect(duration).toBe(245.3);
@@ -293,7 +318,7 @@ describe('FFmpeg', () => {
     it('throws when streams array is empty', async () => {
       execOk(JSON.stringify({ streams: [] }));
 
-      const ffmpeg = new FFmpeg('/tmp/test');
+      const ffmpeg = new FFmpeg();
       await expect(ffmpeg.getDurationSeconds('/tmp/test.mp3')).rejects.toThrow(
         'Could not get duration'
       );
@@ -302,7 +327,7 @@ describe('FFmpeg', () => {
     it('throws when stream has no duration field', async () => {
       execOk(JSON.stringify({ streams: [{ codec_type: 'audio' }] }));
 
-      const ffmpeg = new FFmpeg('/tmp/test');
+      const ffmpeg = new FFmpeg();
       await expect(ffmpeg.getDurationSeconds('/tmp/test.mp3')).rejects.toThrow(
         'Could not get duration'
       );
@@ -311,7 +336,7 @@ describe('FFmpeg', () => {
     it('calls ffprobe with the correct file path', async () => {
       execOk(JSON.stringify({ streams: [{ duration: '10.0' }] }));
 
-      const ffmpeg = new FFmpeg('/tmp/test');
+      const ffmpeg = new FFmpeg();
       await ffmpeg.getDurationSeconds('/tmp/my-audio.mp3');
 
       const cmd: string = mockExec.mock.calls[0][0];

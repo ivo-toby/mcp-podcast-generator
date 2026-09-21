@@ -1,8 +1,8 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { writeFile } from 'fs/promises';
-import { mkdir } from 'fs/promises';
+import { writeFile, readFile, mkdir, unlink } from 'fs/promises';
 import path from 'path';
 import { FFmpeg } from '../audio/ffmpeg.js';
+import { Normalizer, WORKING_LEVEL_LUFS } from '../audio/normalizer.js';
 import { childLogger } from '../utils/logger.js';
 
 const log = childLogger('gemini-tts');
@@ -47,11 +47,13 @@ export class GeminiTTSClient {
   private readonly genAI: GoogleGenerativeAI;
   private readonly model: string;
   private readonly ffmpeg: FFmpeg;
+  private readonly normalizer: Normalizer;
 
   constructor(apiKey: string, tempDir: string, model: string = 'gemini-2.5-flash-preview-tts') {
     this.genAI = new GoogleGenerativeAI(apiKey);
     this.model = model;
-    this.ffmpeg = new FFmpeg(tempDir);
+    this.ffmpeg = new FFmpeg();
+    this.normalizer = new Normalizer(this.ffmpeg, tempDir);
   }
 
   /**
@@ -61,7 +63,7 @@ export class GeminiTTSClient {
   async generateDualHost(
     dialogueText: string,
     hosts: [HostConfig, HostConfig],
-    outputMp3Path: string,
+    outputPcmPath: string,
     tempDir: string
   ): Promise<void> {
     await mkdir(tempDir, { recursive: true });
@@ -93,9 +95,9 @@ export class GeminiTTSClient {
 
     const chunkTargetWords = resolveChunkTargetWords();
     const chunks = chunkDialogue(dialogueText, chunkTargetWords);
-    const pcm = await this.generatePcmInChunks(modelInstance, chunks);
-    await this.savePcmAsMp3(pcm, outputMp3Path, tempDir);
-    log.info({ outputMp3Path }, 'TTS audio saved');
+    const pcm = await this.generatePcmInChunks(modelInstance, chunks, tempDir);
+    await writeFile(outputPcmPath, pcm);
+    log.info({ outputPcmPath }, 'TTS PCM saved');
   }
 
   /**
@@ -104,7 +106,7 @@ export class GeminiTTSClient {
   async generateSingleHost(
     text: string,
     host: HostConfig,
-    outputMp3Path: string,
+    outputPcmPath: string,
     tempDir: string
   ): Promise<void> {
     await mkdir(tempDir, { recursive: true });
@@ -126,21 +128,21 @@ export class GeminiTTSClient {
 
     const chunkTargetWords = resolveChunkTargetWords();
     const chunks = chunkMonologue(text, chunkTargetWords);
-    const pcm = await this.generatePcmInChunks(modelInstance, chunks);
-    await this.savePcmAsMp3(pcm, outputMp3Path, tempDir);
-    log.info({ outputMp3Path }, 'TTS audio saved');
+    const pcm = await this.generatePcmInChunks(modelInstance, chunks, tempDir);
+    await writeFile(outputPcmPath, pcm);
+    log.info({ outputPcmPath }, 'TTS PCM saved');
   }
 
   /**
-   * Call Gemini once per chunk and concatenate the raw PCM responses.
-   * Concatenating at the PCM level (rather than re-encoding each chunk to MP3
-   * and stitching) avoids generational lossy-codec damage and frame-boundary
-   * clicks between chunks.
+   * Call Gemini once per chunk. Each chunk is level-matched in isolation
+   * (static gain to the working level) so per-call level variance between
+   * chunks is masked at the boundaries, then concatenated as raw PCM.
    */
   private async generatePcmInChunks(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     modelInstance: any,
-    chunks: string[]
+    chunks: string[],
+    tempDir: string
   ): Promise<Buffer> {
     if (chunks.length === 0) {
       // The zod schema allows whitespace-only text via z.string().min(1), which
@@ -155,17 +157,18 @@ export class GeminiTTSClient {
     for (let i = 0; i < chunks.length; i++) {
       const start = Date.now();
       const pcm = await this.synthesizeChunkWithRetry(modelInstance, chunks[i]);
+      const leveled = await this.matchChunkToWorkingLevel(pcm, tempDir);
       log.info(
         {
           chunk: i + 1,
           of: chunks.length,
           words: chunks[i].split(/\s+/).length,
-          pcmBytes: pcm.length,
+          pcmBytes: leveled.length,
           durationMs: Date.now() - start,
         },
         'Chunk synthesized'
       );
-      pcmParts.push(pcm);
+      pcmParts.push(leveled);
     }
 
     return Buffer.concat(pcmParts);
@@ -223,24 +226,30 @@ export class GeminiTTSClient {
     return Buffer.concat(buffers);
   }
 
-  private async savePcmAsMp3(
-    pcmBuffer: Buffer,
-    outputMp3Path: string,
-    tempDir: string
-  ): Promise<void> {
+  /**
+   * Level-match one chunk to the pipeline working level. Measurement happens
+   * on the raw s16le PCM Gemini returns; the gain is applied statically so
+   * the chunk's dynamics are untouched. Output is f32le so later gain stages
+   * cannot clip.
+   */
+  private async matchChunkToWorkingLevel(pcm: Buffer, tempDir: string): Promise<Buffer> {
     const ts = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const pcmPath = path.join(tempDir, `gemini-raw-${ts}.pcm`);
+    const rawPath = path.join(tempDir, `tts-chunk-${ts}.pcm`);
+    const leveledPath = path.join(tempDir, `tts-chunk-level-${ts}.pcm`);
 
     try {
-      log.debug({ pcmBytes: pcmBuffer.length, pcmPath }, 'Writing combined PCM to disk');
-      await writeFile(pcmPath, pcmBuffer);
-
-      log.debug({ pcmPath, outputMp3Path }, 'Converting PCM \u2192 MP3 via FFmpeg');
-      await this.ffmpeg.convertPcmToMp3(pcmPath, outputMp3Path);
-      log.debug('PCM \u2192 MP3 conversion done');
+      await writeFile(rawPath, pcm);
+      const gainDb = await this.normalizer.matchLoudness(
+        rawPath,
+        leveledPath,
+        WORKING_LEVEL_LUFS,
+        's16le'
+      );
+      log.debug({ gainDb }, 'Chunk matched to working level');
+      return await readFile(leveledPath);
     } finally {
-      const { unlink } = await import('fs/promises');
-      await unlink(pcmPath).catch(() => {});
+      await unlink(rawPath).catch(() => {});
+      await unlink(leveledPath).catch(() => {});
     }
   }
 }

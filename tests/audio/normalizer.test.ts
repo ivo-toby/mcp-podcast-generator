@@ -1,171 +1,177 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Normalizer } from '../../src/audio/normalizer.js';
-import type { FFmpeg, NormalizationMeasurement } from '../../src/audio/ffmpeg.js';
+import { WORKING_LEVEL_LUFS } from '../../src/audio/normalizer.js';
+import type { FFmpeg, LoudnessMeasurement, PcmFormat } from '../../src/audio/ffmpeg.js';
 
 // ---------------------------------------------------------------------------
-// Mock fs/promises (used via dynamic import inside normalizer)
+// Mock fs/promises (rename used by the finalize corrective pass)
 // ---------------------------------------------------------------------------
 
-const mockCopyFile = vi.fn().mockResolvedValue(undefined);
-const mockRename = vi.fn().mockResolvedValue(undefined);
+const { mockRename } = vi.hoisted(() => ({ mockRename: vi.fn().mockResolvedValue(undefined) }));
 
 vi.mock('fs/promises', () => ({
-  copyFile: mockCopyFile,
+  copyFile: vi.fn().mockResolvedValue(undefined),
   rename: mockRename,
   writeFile: vi.fn().mockResolvedValue(undefined),
+  readFile: vi.fn().mockResolvedValue(Buffer.alloc(0)),
   unlink: vi.fn().mockResolvedValue(undefined),
   mkdir: vi.fn().mockResolvedValue(undefined),
+  stat: vi.fn().mockResolvedValue({ size: 0 }),
 }));
 
 // ---------------------------------------------------------------------------
 // Build a mock FFmpeg instance
 // ---------------------------------------------------------------------------
 
-function makeMockFFmpeg(measurement: Partial<NormalizationMeasurement> = {}): FFmpeg {
-  const defaultMeasurement: NormalizationMeasurement = {
-    inputI: -23.5,
-    inputTp: -2.0,
-    inputLra: 7.0,
-    inputThresh: -33.5,
-    offset: 0.5,
-    ...measurement,
-  };
+function makeMockFFmpeg(measurements: LoudnessMeasurement[]): FFmpeg {
+  let call = 0;
   return {
-    measureLoudness: vi.fn().mockResolvedValue(defaultMeasurement),
-    normalizeLoudness: vi.fn().mockResolvedValue(undefined),
+    measureLoudness: vi.fn().mockImplementation(() => {
+      const m = measurements[Math.min(call, measurements.length - 1)];
+      call++;
+      return Promise.resolve(m);
+    }),
+    applyGain: vi.fn().mockResolvedValue(undefined),
+    applyGainAndLimit: vi.fn().mockResolvedValue(undefined),
     convertPcmToMp3: vi.fn().mockResolvedValue(undefined),
-    concatenate: vi.fn().mockResolvedValue(undefined),
     addFade: vi.fn().mockResolvedValue(undefined),
     getDurationSeconds: vi.fn().mockResolvedValue(60),
+    pcmDurationSeconds: vi.fn().mockResolvedValue(60),
+    decodeToPcm32: vi.fn().mockResolvedValue(undefined),
+    concatPcm: vi.fn().mockResolvedValue(undefined),
   } as unknown as FFmpeg;
 }
+
+const measurement = (inputI: number): LoudnessMeasurement => ({
+  inputI,
+  inputTp: -2.0,
+  inputLra: 7.0,
+  inputThresh: -33.5,
+});
 
 describe('Normalizer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockRename.mockResolvedValue(undefined);
   });
 
   // -------------------------------------------------------------------------
-  // normalizeFile
+  // WORKING_LEVEL_LUFS
   // -------------------------------------------------------------------------
 
-  describe('normalizeFile', () => {
-    it('copies file directly when loudness is within 1 dB of target', async () => {
-      // inputI = -16.5, target = -16 → diff = 0.5 < 1.0 → skip
-      const ffmpeg = makeMockFFmpeg({ inputI: -16.5 });
+  it('exposes -20 LUFS as the working level', () => {
+    expect(WORKING_LEVEL_LUFS).toBe(-20);
+  });
+
+  // -------------------------------------------------------------------------
+  // matchLoudness
+  // -------------------------------------------------------------------------
+
+  describe('matchLoudness', () => {
+    it('applies the exact static gain to reach the target', async () => {
+      // inputI = -23.5, target = -20 → gain = +3.5
+      const ffmpeg = makeMockFFmpeg([measurement(-23.5)]);
       const normalizer = new Normalizer(ffmpeg, '/tmp/test');
 
-      await normalizer.normalizeFile('/tmp/in.mp3', '/tmp/out.mp3', -16);
+      const gain = await normalizer.matchLoudness('/tmp/in.pcm', '/tmp/out.pcm', -20);
 
-      expect(mockCopyFile).toHaveBeenCalledWith('/tmp/in.mp3', '/tmp/out.mp3');
-      expect(ffmpeg.normalizeLoudness).not.toHaveBeenCalled();
+      expect(gain).toBe(3.5);
+      expect(ffmpeg.applyGain).toHaveBeenCalledWith('/tmp/in.pcm', 3.5, '/tmp/out.pcm', 'f32le');
+      expect(ffmpeg.applyGainAndLimit).not.toHaveBeenCalled();
     });
 
-    it('copies when loudness exactly matches target', async () => {
-      const ffmpeg = makeMockFFmpeg({ inputI: -16.0 });
+    it('measures with the given input format', async () => {
+      const ffmpeg = makeMockFFmpeg([measurement(-20)]);
       const normalizer = new Normalizer(ffmpeg, '/tmp/test');
 
-      await normalizer.normalizeFile('/tmp/in.mp3', '/tmp/out.mp3', -16);
+      await normalizer.matchLoudness('/tmp/in.pcm', '/tmp/out.pcm', -20, 's16le');
 
-      expect(mockCopyFile).toHaveBeenCalledOnce();
-      expect(ffmpeg.normalizeLoudness).not.toHaveBeenCalled();
+      expect(ffmpeg.measureLoudness).toHaveBeenCalledWith('/tmp/in.pcm', 's16le');
+      // No gain needed — still applies volume=0 for format conversion
+      expect(ffmpeg.applyGain).toHaveBeenCalledWith('/tmp/in.pcm', 0, '/tmp/out.pcm', 's16le');
     });
 
-    it('normalizes when loudness is more than 1 dB below target', async () => {
-      // inputI = -20, target = -16 → diff = 4.0 ≥ 1.0 → normalize
-      const ffmpeg = makeMockFFmpeg({ inputI: -20.0 });
+    it('applies zero gain for silent input instead of amplifying noise', async () => {
+      const ffmpeg = makeMockFFmpeg([measurement(-70)]);
       const normalizer = new Normalizer(ffmpeg, '/tmp/test');
 
-      await normalizer.normalizeFile('/tmp/in.mp3', '/tmp/out.mp3', -16);
+      const gain = await normalizer.matchLoudness('/tmp/in.pcm', '/tmp/out.pcm', -20);
 
-      expect(ffmpeg.normalizeLoudness).toHaveBeenCalledWith(
-        '/tmp/in.mp3',
-        '/tmp/out.mp3',
-        -16,
-        expect.objectContaining({ inputI: -20.0 })
-      );
-      expect(mockCopyFile).not.toHaveBeenCalled();
-    });
-
-    it('normalizes when loudness is more than 1 dB above target', async () => {
-      // inputI = -10, target = -16 → diff = 6.0 ≥ 1.0 → normalize
-      const ffmpeg = makeMockFFmpeg({ inputI: -10.0 });
-      const normalizer = new Normalizer(ffmpeg, '/tmp/test');
-
-      await normalizer.normalizeFile('/tmp/in.mp3', '/tmp/out.mp3', -16);
-
-      expect(ffmpeg.normalizeLoudness).toHaveBeenCalledOnce();
-      expect(mockCopyFile).not.toHaveBeenCalled();
-    });
-
-    it('uses -16 LUFS as default target', async () => {
-      const ffmpeg = makeMockFFmpeg({ inputI: -20.0 });
-      const normalizer = new Normalizer(ffmpeg, '/tmp/test');
-
-      await normalizer.normalizeFile('/tmp/in.mp3', '/tmp/out.mp3');
-
-      expect(ffmpeg.normalizeLoudness).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.any(String),
-        -16,
-        expect.any(Object)
+      expect(gain).toBe(0);
+      expect(ffmpeg.applyGain).toHaveBeenCalledWith(
+        '/tmp/in.pcm',
+        0,
+        '/tmp/out.pcm',
+        'f32le'
       );
     });
 
-    it('passes measurement values to normalizeLoudness', async () => {
-      const measurement: NormalizationMeasurement = {
-        inputI: -25.0,
-        inputTp: -3.0,
-        inputLra: 8.0,
-        inputThresh: -35.0,
-        offset: 0.2,
-      };
-      const ffmpeg = makeMockFFmpeg(measurement);
+    it('never applies dynamic normalization', async () => {
+      const ffmpeg = makeMockFFmpeg([measurement(-40)]);
       const normalizer = new Normalizer(ffmpeg, '/tmp/test');
 
-      await normalizer.normalizeFile('/tmp/in.mp3', '/tmp/out.mp3', -16);
+      await normalizer.matchLoudness('/tmp/in.pcm', '/tmp/out.pcm', -16);
 
-      expect(ffmpeg.normalizeLoudness).toHaveBeenCalledWith(
-        '/tmp/in.mp3',
-        '/tmp/out.mp3',
-        -16,
-        expect.objectContaining(measurement)
-      );
+      expect(ffmpeg.applyGainAndLimit).not.toHaveBeenCalled();
     });
   });
 
   // -------------------------------------------------------------------------
-  // normalizeInPlace
+  // finalize
   // -------------------------------------------------------------------------
 
-  describe('normalizeInPlace', () => {
-    it('normalizes to a temp file then renames to original path', async () => {
-      const ffmpeg = makeMockFFmpeg({ inputI: -20.0 });
-      const normalizer = new Normalizer(ffmpeg, '/tmp/podcast-gen');
+  describe('finalize', () => {
+    it('applies static gain plus limiter to reach the publish target', async () => {
+      // First measure: -22 → gain +6. Verify measure: -16.2 (within 0.5) → no correction
+      const ffmpeg = makeMockFFmpeg([measurement(-22), measurement(-16.2)]);
+      const normalizer = new Normalizer(ffmpeg, '/tmp/test');
 
-      await normalizer.normalizeInPlace('/tmp/my-audio.mp3');
+      await normalizer.finalize('/tmp/in.pcm', '/tmp/out.pcm', -16);
 
-      // normalizeLoudness should have been called with a temp path
-      const normCall = (ffmpeg.normalizeLoudness as ReturnType<typeof vi.fn>).mock.calls[0];
-      const [inputPath, tempPath] = normCall as [string, string];
-      expect(inputPath).toBe('/tmp/my-audio.mp3');
-      expect(tempPath).toContain('/tmp/podcast-gen/norm-');
-      expect(tempPath).toMatch(/\.mp3$/);
-
-      // Should rename temp → original
-      expect(mockRename).toHaveBeenCalledWith(tempPath, '/tmp/my-audio.mp3');
+      expect(ffmpeg.applyGainAndLimit).toHaveBeenCalledWith('/tmp/in.pcm', 6, -1.5, '/tmp/out.pcm');
+      expect(ffmpeg.measureLoudness).toHaveBeenCalledTimes(2);
+      // Verified result within tolerance — no corrective pass
+      expect(ffmpeg.applyGain).not.toHaveBeenCalled();
+      expect(mockRename).not.toHaveBeenCalled();
     });
 
-    it('uses a unique temp file name on each call', async () => {
-      const ffmpeg = makeMockFFmpeg({ inputI: -20.0 });
-      const normalizer = new Normalizer(ffmpeg, '/tmp/podcast-gen');
+    it('applies a corrective gain when the result drifts beyond tolerance', async () => {
+      // First measure: -22 → gain +6. Verify measure: -15.2 (0.8 off) → correction -0.8
+      const ffmpeg = makeMockFFmpeg([measurement(-22), measurement(-15.2)]);
+      const normalizer = new Normalizer(ffmpeg, '/tmp/test');
 
-      await normalizer.normalizeInPlace('/tmp/audio.mp3');
-      await normalizer.normalizeInPlace('/tmp/audio.mp3');
+      await normalizer.finalize('/tmp/in.pcm', '/tmp/out.pcm', -16);
 
-      const firstTempPath = (ffmpeg.normalizeLoudness as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
-      const secondTempPath = (ffmpeg.normalizeLoudness as ReturnType<typeof vi.fn>).mock.calls[1][1] as string;
-      expect(firstTempPath).not.toBe(secondTempPath);
+      expect(ffmpeg.applyGain).toHaveBeenCalledWith(
+        '/tmp/out.pcm',
+        -0.8,
+        expect.stringContaining('/tmp/test/')
+      );
+      expect(mockRename).toHaveBeenCalledWith(
+        expect.stringContaining('/tmp/test/'),
+        '/tmp/out.pcm'
+      );
+    });
+
+    it('skips the corrective pass when drift is within tolerance', async () => {
+      // Verify measure: -15.7 (0.3 off) → no correction
+      const ffmpeg = makeMockFFmpeg([measurement(-22), measurement(-15.7)]);
+      const normalizer = new Normalizer(ffmpeg, '/tmp/test');
+
+      await normalizer.finalize('/tmp/in.pcm', '/tmp/out.pcm', -16);
+
+      expect(ffmpeg.applyGain).not.toHaveBeenCalled();
+      expect(mockRename).not.toHaveBeenCalled();
+    });
+
+    it('does not correct when the limited output is silent', async () => {
+      const ffmpeg = makeMockFFmpeg([measurement(-22), measurement(-70)]);
+      const normalizer = new Normalizer(ffmpeg, '/tmp/test');
+
+      await normalizer.finalize('/tmp/in.pcm', '/tmp/out.pcm', -16);
+
+      expect(ffmpeg.applyGain).not.toHaveBeenCalled();
+      expect(mockRename).not.toHaveBeenCalled();
     });
   });
 });

@@ -385,9 +385,13 @@ Process-local FIFO job manager (one active job)
 get_job_status → stage updates and terminal result
 ~~~
 
-The generation pipeline uses gemini-2.5-flash-preview-tts, converts PCM to MP3
-with FFmpeg, and applies EBU R128 normalization (default target -16 LUFS).
-Optional intro/outro URLs are downloaded and mixed by the audio assembler.
+The generation pipeline uses gemini-2.5-flash-preview-tts. Each TTS chunk is
+level-matched with a static gain to a −20 LUFS working level; all mixing
+happens on float PCM, and a single final pass applies static gain to the
+publish target (default −16 LUFS) plus a true-peak limiter before the one and
+only MP3 encode. No dynamic normalization runs anywhere in the chain, so the
+speech keeps its natural dynamics. Optional intro/outro URLs are downloaded,
+decoded to PCM, and gain-matched by the audio assembler.
 
 ## Available Gemini voices
 

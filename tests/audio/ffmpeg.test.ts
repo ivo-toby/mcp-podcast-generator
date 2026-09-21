@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import path from 'path';
 
 // ---------------------------------------------------------------------------
 // Mock child_process — must happen before any module that imports it
@@ -274,15 +275,26 @@ describe('FFmpeg', () => {
       expect(mockReadFile).not.toHaveBeenCalled();
     });
 
-    it('byte-concatenates multiple PCM files', async () => {
-      mockReadFile
-        .mockResolvedValueOnce(Buffer.from([1, 2]))
-        .mockResolvedValueOnce(Buffer.from([3, 4]));
+    it('byte-concatenates multiple PCM files in order', async () => {
+      // Real fs: streaming concat runs outside the fs/promises mock, and the
+      // ordering guarantee is the point of the test.
+      const fs = await vi.importActual<typeof import('fs/promises')>('fs/promises');
+      const os = await import('os');
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'concat-test-'));
+      try {
+        const a = path.join(dir, 'a.pcm');
+        const b = path.join(dir, 'b.pcm');
+        const out = path.join(dir, 'out.pcm');
+        await fs.writeFile(a, Buffer.from([1, 2]));
+        await fs.writeFile(b, Buffer.from([3, 4]));
 
-      const ffmpeg = new FFmpeg();
-      await ffmpeg.concatPcm(['/tmp/a.pcm', '/tmp/b.pcm'], '/tmp/out.pcm');
+        const ffmpeg = new FFmpeg();
+        await ffmpeg.concatPcm([a, b], out);
 
-      expect(mockWriteFile).toHaveBeenCalledWith('/tmp/out.pcm', Buffer.from([1, 2, 3, 4]));
+        expect(await fs.readFile(out)).toEqual(Buffer.from([1, 2, 3, 4]));
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true });
+      }
     });
   });
 

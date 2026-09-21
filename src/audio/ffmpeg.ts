@@ -1,6 +1,8 @@
 import { exec as execCb } from 'child_process';
 import { promisify } from 'util';
-import { writeFile, readFile, unlink, copyFile, stat } from 'fs/promises';
+import { createReadStream, createWriteStream } from 'fs';
+import { pipeline } from 'stream/promises';
+import { unlink, copyFile, stat } from 'fs/promises';
 import path from 'path';
 
 const exec = promisify(execCb);
@@ -152,6 +154,9 @@ export class FFmpeg {
   /**
    * Concatenate same-format raw PCM files by byte concatenation. All parts
    * must already be f32le mono PCM — format mismatches would corrupt audio.
+   * Streams parts sequentially so peak memory stays constant regardless of
+   * episode length; buffering the whole episode twice can exceed the
+   * container's memory limit on long jobs.
    */
   async concatPcm(inputPaths: string[], outputPath: string): Promise<void> {
     if (inputPaths.length === 0) {
@@ -162,8 +167,13 @@ export class FFmpeg {
       return;
     }
 
-    const parts = await Promise.all(inputPaths.map((p) => readFile(p)));
-    await writeFile(outputPath, Buffer.concat(parts));
+    for (let i = 0; i < inputPaths.length; i++) {
+      const flags = i === 0 ? 'w' : 'a';
+      await pipeline(
+        createReadStream(inputPaths[i]),
+        createWriteStream(outputPath, { flags })
+      );
+    }
   }
 
   /**

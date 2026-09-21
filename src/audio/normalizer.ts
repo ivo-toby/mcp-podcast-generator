@@ -9,8 +9,13 @@ import { rename } from 'fs/promises';
  */
 export const WORKING_LEVEL_LUFS = -20;
 
-/** Sample-peak ceiling for the final lookahead limiter, dBFS. */
-const LIMITER_CEILING_DB = -1.5;
+/**
+ * Sample-peak ceiling for the final lookahead limiter, dBFS. Sits ~2.5 dB
+ * under the −1 dBTP delivery target: MP3 encoding of this 24kHz material
+ * reconstructs inter-sample peaks that far above the sample ceiling
+ * (measured: ceiling −1.5 → MP3 TP +0.9; ceiling −3.5 → MP3 TP −1.1).
+ */
+const LIMITER_CEILING_DB = -3.5;
 
 /** Integrated-loudness tolerance before the final pass applies a correction. */
 const LUFS_TOLERANCE = 0.5;
@@ -49,8 +54,9 @@ export class Normalizer {
   /**
    * Final mix pass: static gain to the publish target, then a lookahead
    * limiter that only touches isolated peaks above the ceiling. Re-measures
-   * and applies one corrective gain if gating or limiting shifted the
-   * integrated loudness beyond tolerance. Output is f32le mono PCM.
+   * and, if gating or limiting shifted the integrated loudness beyond
+   * tolerance, applies one corrective gain — again through the limiter, so
+   * peaks stay at the ceiling. Output is f32le mono PCM.
    */
   async finalize(inputPcm: string, outputPcm: string, targetLufs: number): Promise<void> {
     const measurement = await this.ffmpeg.measureLoudness(inputPcm, 'f32le');
@@ -58,18 +64,23 @@ export class Normalizer {
     await this.ffmpeg.applyGainAndLimit(inputPcm, gainDb, LIMITER_CEILING_DB, outputPcm);
 
     const verified = await this.ffmpeg.measureLoudness(outputPcm, 'f32le');
-    const drift = verified.inputI - targetLufs;
-    if (!Number.isFinite(verified.inputI) || verified.inputI <= SILENCE_FLOOR_LUFS) {
+    if (!this.needsCorrection(verified, targetLufs)) {
       return;
     }
-    if (Math.abs(drift) > LUFS_TOLERANCE) {
-      const correction = Math.round(-drift * 100) / 100;
-      const correctedPath = path.join(
-        this.tempDir,
-        `finalize-correction-${Date.now()}-${Math.random().toString(36).slice(2)}.pcm`
-      );
-      await this.ffmpeg.applyGain(outputPcm, correction, correctedPath);
-      await rename(correctedPath, outputPcm);
+    const correction = Math.round((targetLufs - verified.inputI) * 100) / 100;
+    const correctedPath = path.join(
+      this.tempDir,
+      `finalize-correction-${Date.now()}-${Math.random().toString(36).slice(2)}.pcm`
+    );
+    await this.ffmpeg.applyGainAndLimit(outputPcm, correction, LIMITER_CEILING_DB, correctedPath);
+    await rename(correctedPath, outputPcm);
+  }
+
+  private needsCorrection(measurement: LoudnessMeasurement, targetLufs: number): boolean {
+    const inputI = measurement.inputI;
+    if (!Number.isFinite(inputI) || inputI <= SILENCE_FLOOR_LUFS) {
+      return false;
     }
+    return Math.abs(inputI - targetLufs) > LUFS_TOLERANCE;
   }
 }

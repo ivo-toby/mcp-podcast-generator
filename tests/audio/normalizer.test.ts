@@ -128,23 +128,25 @@ describe('Normalizer', () => {
 
       await normalizer.finalize('/tmp/in.pcm', '/tmp/out.pcm', -16);
 
-      expect(ffmpeg.applyGainAndLimit).toHaveBeenCalledWith('/tmp/in.pcm', 6, -1.5, '/tmp/out.pcm');
+      expect(ffmpeg.applyGainAndLimit).toHaveBeenCalledWith('/tmp/in.pcm', 6, -3.5, '/tmp/out.pcm');
       expect(ffmpeg.measureLoudness).toHaveBeenCalledTimes(2);
       // Verified result within tolerance — no corrective pass
-      expect(ffmpeg.applyGain).not.toHaveBeenCalled();
+      expect(ffmpeg.applyGainAndLimit).toHaveBeenCalledTimes(1);
       expect(mockRename).not.toHaveBeenCalled();
     });
 
-    it('applies a corrective gain when the result drifts beyond tolerance', async () => {
-      // First measure: -22 → gain +6. Verify measure: -15.2 (0.8 off) → correction -0.8
+    it('re-applies the corrective gain through the limiter when the result drifts beyond tolerance', async () => {
+      // First measure: -22 → gain +6. Verify measure: -15.2 (0.8 off) → corrective pass
       const ffmpeg = makeMockFFmpeg([measurement(-22), measurement(-15.2)]);
       const normalizer = new Normalizer(ffmpeg, '/tmp/test');
 
       await normalizer.finalize('/tmp/in.pcm', '/tmp/out.pcm', -16);
 
-      expect(ffmpeg.applyGain).toHaveBeenCalledWith(
+      expect(ffmpeg.applyGainAndLimit).toHaveBeenCalledTimes(2);
+      expect(ffmpeg.applyGainAndLimit).toHaveBeenLastCalledWith(
         '/tmp/out.pcm',
         -0.8,
+        -3.5,
         expect.stringContaining('/tmp/test/')
       );
       expect(mockRename).toHaveBeenCalledWith(
@@ -160,7 +162,7 @@ describe('Normalizer', () => {
 
       await normalizer.finalize('/tmp/in.pcm', '/tmp/out.pcm', -16);
 
-      expect(ffmpeg.applyGain).not.toHaveBeenCalled();
+      expect(ffmpeg.applyGainAndLimit).toHaveBeenCalledTimes(1);
       expect(mockRename).not.toHaveBeenCalled();
     });
 
@@ -170,7 +172,7 @@ describe('Normalizer', () => {
 
       await normalizer.finalize('/tmp/in.pcm', '/tmp/out.pcm', -16);
 
-      expect(ffmpeg.applyGain).not.toHaveBeenCalled();
+      expect(ffmpeg.applyGainAndLimit).toHaveBeenCalledTimes(1);
       expect(mockRename).not.toHaveBeenCalled();
     });
   });

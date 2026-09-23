@@ -310,6 +310,7 @@ backend is configured; that job returns no_storage_or_feed_configured.
 | OUTPUT_DIR | | /output | Directory where MP3 files are written |
 | TEMP_DIR | | /tmp/podcast-gen | Temporary processing directory |
 | PORT | | 3000 | HTTP server port |
+| TTS_CHUNK_TARGET_WORDS | | 450 | Target spoken-word count per Gemini TTS call (50–800). Each call produces roughly 2.5–3 minutes of audio. |
 | LOG_LEVEL | | info | Log level (info, debug, warn, error) |
 | PUBLIC_URL | | http://localhost:3000 | Download base URL; public HTTP(S) required for RSS-only mode. |
 | S3_ENDPOINT | | — | S3-compatible endpoint; set all required S3 variables together. |
@@ -384,9 +385,13 @@ Process-local FIFO job manager (one active job)
 get_job_status → stage updates and terminal result
 ~~~
 
-The generation pipeline uses gemini-2.5-flash-preview-tts, converts PCM to MP3
-with FFmpeg, and applies EBU R128 normalization (default target -16 LUFS).
-Optional intro/outro URLs are downloaded and mixed by the audio assembler.
+The generation pipeline uses gemini-2.5-flash-preview-tts. Each TTS chunk is
+level-matched with a static gain to a −20 LUFS working level; all mixing
+happens on float PCM, and a single final pass applies static gain to the
+publish target (default −16 LUFS) plus a true-peak limiter before the one and
+only MP3 encode. No dynamic normalization runs anywhere in the chain, so the
+speech keeps its natural dynamics. Optional intro/outro URLs are downloaded,
+decoded to PCM, and gain-matched by the audio assembler.
 
 ## Available Gemini voices
 

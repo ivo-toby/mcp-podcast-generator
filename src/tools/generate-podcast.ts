@@ -102,7 +102,7 @@ export async function generatePodcast(
   await mkdir(tempDir, { recursive: true });
 
   const ts = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const ttsOutputPath = path.join(tempDir, `tts-${ts}.mp3`);
+  const ttsOutputPath = path.join(tempDir, `tts-${ts}.pcm`);
   const outputPath = path.join(outputDir, input.outputFilename);
 
   const totalWords = input.segments.reduce((n, s) => n + s.text.split(/\s+/).length, 0);
@@ -151,13 +151,13 @@ export async function generatePodcast(
 
     log.info({ durationMs: Date.now() - ttsStart }, 'Gemini TTS complete');
 
-    log.info('Assembling episode (normalize + music + concat + final normalize)');
+    log.info('Assembling episode (concat + final loudness pass + encode)');
     const assembleStart = Date.now();
 
     // Assemble with optional music + normalization
     const assembler = new Assembler(tempDir);
     const result = await assembler.assemble({
-      ttsAudioPath: ttsOutputPath,
+      ttsPcmPath: ttsOutputPath,
       outputPath,
       introMusicUrl: input.introMusicUrl,
       outroMusicUrl: input.outroMusicUrl,
